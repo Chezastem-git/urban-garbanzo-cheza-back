@@ -1,3 +1,4 @@
+//src/middleware/adminAuth.js
 import jwt from "jsonwebtoken";
 
 export const requireAdmin = (req, res, next) => {

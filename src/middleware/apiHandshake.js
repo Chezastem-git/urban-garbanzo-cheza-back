@@ -1,11 +1,18 @@
 import crypto from "crypto";
 
-const seenNonces = new Set();
+// Store nonces with their creation timestamp
+const seenNonces = new Map();
 const MAX_TIMESTAMP_DELTA_MS = 5 * 60 * 1000; // 5 minutes
 
+// Sweep expired nonces every minute
 setInterval(() => {
-  seenNonces.clear();
-}, MAX_TIMESTAMP_DELTA_MS * 2);
+  const now = Date.now();
+  for (const [nonce, timestamp] of seenNonces.entries()) {
+    if (now - timestamp > MAX_TIMESTAMP_DELTA_MS) {
+      seenNonces.delete(nonce);
+    }
+  }
+}, 60 * 1000);
 
 const verifyApiHandshake = (req, res, next) => {
   try {
@@ -96,7 +103,8 @@ const verifyApiHandshake = (req, res, next) => {
         .json({ message: "Unauthorized: Handshake signature mismatch." });
     }
 
-    seenNonces.add(nonce);
+    // Store nonce with timestamp after successful signature check
+    seenNonces.set(nonce, Date.now());
     next();
   } catch (err) {
     console.error("Handshake Middleware Exception:", err);

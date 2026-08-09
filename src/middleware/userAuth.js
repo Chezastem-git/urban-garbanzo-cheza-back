@@ -1,3 +1,4 @@
+// src/middleware/userAuth.js
 import jwt from "jsonwebtoken";
 
 export const requireUserAuth = (req, res, next) => {

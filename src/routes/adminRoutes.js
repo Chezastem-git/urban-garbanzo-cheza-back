@@ -1,3 +1,4 @@
+// src/routed/adminRoutes.js
 import { Router } from "express";
 import {
   registerAdmin,
