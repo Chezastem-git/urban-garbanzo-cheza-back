@@ -75,8 +75,10 @@ const verifyApiHandshake = (req, res, next) => {
 
     // Clean endpoint string (e.g., /api/auth/login)
     const endpointPath = req.originalUrl.split("?")[0];
+    const httpMethod = req.method.toUpperCase();
 
-    const payloadToSign = `${req.method}:${endpointPath}:${timestampStr}:${nonce}:${bodyHash}`;
+    const payloadToSign = `${httpMethod}:${endpointPath}:${timestampStr}:${nonce}:${bodyHash}`;
+    
     const computedSignature = crypto
       .createHmac("sha256", secretKey)
       .update(payloadToSign)
