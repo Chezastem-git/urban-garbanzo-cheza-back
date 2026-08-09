@@ -2,10 +2,11 @@
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import Cohort from "../models/Cohort.js"; // only needed if you validate cohort code
 
 export const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, role, cohort } = req.body;
 
     if (!email || !password) {
       return res
@@ -13,7 +14,11 @@ export const login = async (req, res) => {
         .json({ message: "Email and password are required." });
     }
 
-    // Find user by lowercase email and populate cohort details
+    // Optional but recommended: require role from the UI switcher
+    if (role && !["student", "instructor"].includes(role)) {
+      return res.status(400).json({ message: "Invalid login role." });
+    }
+
     const user = await User.findOne({ email: email.toLowerCase() }).populate(
       "cohortId",
     );
@@ -39,8 +44,44 @@ export const login = async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password." });
     }
 
+    // --- Role gate: student cannot use instructor login, and vice versa ---
+    if (role && user.role !== role) {
+      return res.status(403).json({
+        message:
+          role === "student"
+            ? "This account is not a student account. Use Instructor login."
+            : "This account is not an instructor account. Use Student login.",
+      });
+    }
+
+    // --- Student-only: optional cohort check ---
+    // Keep this if your product still requires cohort on student login.
+    if (user.role === "student" && cohort) {
+      const cohortCode = cohort.trim().toLowerCase();
+      const userCohortCode =
+        user.cohortId?.code?.toLowerCase?.() ||
+        user.cohortId?.name?.toLowerCase?.();
+
+      // If the user has a cohort and the provided code doesn't match, reject
+      if (user.cohortId && userCohortCode && userCohortCode !== cohortCode) {
+        // Also try matching by name with hyphens → spaces
+        const normalizedInput = cohortCode.replace(/-/g, " ");
+        const normalizedName = (user.cohortId.name || "").toLowerCase();
+
+        if (normalizedName !== normalizedInput) {
+          return res.status(401).json({
+            message: "Cohort does not match this student account.",
+          });
+        }
+      }
+    }
+
     const token = jwt.sign(
-      { userId: user._id, role: user.role, status: user.status },
+      {
+        userId: user._id,
+        role: user.role,
+        status: user.status,
+      },
       process.env.JWT_SECRET || "fallback_secret",
       { expiresIn: "7d" },
     );
@@ -51,7 +92,7 @@ export const login = async (req, res) => {
         id: user._id,
         fullName: user.fullName,
         email: user.email,
-        role: user.role,
+        role: user.role, // "student" | "instructor"
         status: user.status,
         cohort: user.cohortId,
       },
