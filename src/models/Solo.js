@@ -22,6 +22,8 @@ const soloSubmissionSchema = new mongoose.Schema(
       enum: ["pending", "graded", "resubmit"],
       default: "pending",
     },
+    rubricScores: { type: Map, of: Number, default: {} },
+    rubricRemarks: { type: Map, of: String, default: {} },
   },
   { timestamps: true },
 );
