@@ -1,9 +1,12 @@
-// src/routes/adminRoutes.js
-import { Router } from "express";
 import {
   registerAdmin,
   adminLogin,
   getAdminDashboard,
+  createCourse,
+  getAllCourses,
+  getCourseById,
+  updateCourse,
+  deleteCourse,
   createCohort,
   getAllCohorts,
   getCohortById,
@@ -15,28 +18,54 @@ import {
   updateUserStatus,
   assignUserToCohort,
   resetUserPassword,
+  bulkAssignStudentsToCohort,
   createMilestone,
   updateMilestone,
   unlockMilestone,
   createSolo,
   createAssessment,
+  getGraduationSettings,
+  updateGraduationSettings,
   evaluateGraduationEligibility,
   graduateStudent,
-  bulkAssignStudentsToCohort,
+  getMilestoneById,
+  createSegment,
+  getSegmentById,
+  updateSegment,
+
+  getAllAssessments,
+  getAssessmentById,
+  deleteSegment,
 } from "../controllers/adminController.js";
 import { requireAdmin } from "../middleware/adminAuth.js";
+import { Router } from "express";
 
 const router = Router();
 
-// ── Public ──────────────────────────────────
+router.get("/milestones/:milestoneId", getMilestoneById);
+router.post("/segments", createSegment);
+router.get("/segments/:segmentId", getSegmentById);
+router.patch("/segments/:segmentId", updateSegment);
+router.delete("/segments/:segmentId", deleteSegment);
+
+// assessments
+// router.post("/assessments", createAssessment);
+router.get("/assessments", getAllAssessments);
+router.get("/assessments/:assessmentId", getAssessmentById);
+
 router.post("/setup", registerAdmin);
 router.post("/login", adminLogin);
 
-// ── Protected ───────────────────────────────
 router.use(requireAdmin);
 
-// Dashboard
 router.get("/dashboard", getAdminDashboard);
+
+// Courses
+router.post("/courses", createCourse);
+router.get("/courses", getAllCourses);
+router.get("/courses/:courseId", getCourseById);
+router.patch("/courses/:courseId", updateCourse);
+router.delete("/courses/:courseId", deleteCourse);
 
 // Cohorts
 router.post("/cohorts", createCohort);
@@ -61,7 +90,9 @@ router.patch("/milestones/:milestoneId/unlock", unlockMilestone);
 router.post("/solos", createSolo);
 router.post("/assessments", createAssessment);
 
-// Graduation & Certificates
+// Graduation
+router.get("/graduation-settings", getGraduationSettings);
+router.put("/graduation-settings", updateGraduationSettings);
 router.get("/students/:studentId/eligibility", evaluateGraduationEligibility);
 router.post("/students/:studentId/graduate", graduateStudent);
 
