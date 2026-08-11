@@ -1,22 +1,28 @@
-// src/models
+// src/models/Milestone.js
 import mongoose from "mongoose";
 
-const segmentSchema = new mongoose.Schema({
-  title: { type: String, required: true },
-  description: { type: String },
-  duration: { type: String }, // e.g. "2 hours"
-  order: { type: Number, required: true },
-  content: { type: String }, // Markdown / HTML content
-  videoUrl: { type: String },
-  isCompleted: { type: Boolean, default: false }
-});
+const milestoneSchema = new mongoose.Schema(
+  {
+    courseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Course",
+      required: true,
+      index: true,
+    },
+    title: { type: String, required: true, trim: true },
+    description: { type: String, default: "" },
+    order: { type: Number, default: 0 },
+    duration: { type: String, default: "" },
+    topics: [{ type: String }],
+    isUnlocked: { type: Boolean, default: false },
+    soloId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Solo",
+      default: null,
+    },
+  },
+  { timestamps: true },
+);
 
-const milestoneSchema = new mongoose.Schema({
-  title: { type: String, required: true },
-  description: { type: String },
-  cohortId: { type: mongoose.Schema.Types.ObjectId, ref: "Cohort", required: true },
-  order: { type: Number, required: true },
-  segments: [segmentSchema]
-}, { timestamps: true });
-
-export default mongoose.model("Milestone", milestoneSchema);
+export default mongoose.models.Milestone ||
+  mongoose.model("Milestone", milestoneSchema);
