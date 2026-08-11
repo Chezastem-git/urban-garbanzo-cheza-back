@@ -1,60 +1,52 @@
 // src/models/Solo.js
 import mongoose from "mongoose";
 
-const soloSubmissionSchema = new mongoose.Schema(
-  {
-    studentId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-    },
-    repositoryUrl: { type: String, required: true },
-    liveDemoUrl: { type: String },
-    notes: { type: String },
-    score: { type: Number, min: 0, max: 100 },
-    feedback: { type: String },
-    gradedByInstructorId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-    },
-    status: {
-      type: String,
-      enum: ["pending", "graded", "resubmit"],
-      default: "pending",
-    },
-    rubricScores: { type: Map, of: Number, default: {} },
-    rubricRemarks: { type: Map, of: String, default: {} },
+const submissionSchema = new mongoose.Schema({
+  studentId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    required: true,
   },
-  { timestamps: true },
-);
+  repositoryUrl: String,
+  liveDemoUrl: String,
+  notes: String,
+  status: { type: String, enum: ["pending", "graded"], default: "pending" },
+  scorePercentage: Number,
+  totalScore: Number,
+  generalFeedback: String,
+  rubricScores: { type: Map, of: Number },
+  rubricRemarks: { type: Map, of: String },
+  submittedAt: { type: Date, default: Date.now },
+  gradedAt: Date,
+  gradedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+});
 
 const soloSchema = new mongoose.Schema(
   {
-    title: { type: String, required: true },
-    description: { type: String, required: true },
-    dueDate: { type: Date, required: true },
-    cohortId: {
+    courseId: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "Cohort",
+      ref: "Course",
       required: true,
+      index: true,
     },
-    order: { type: Number, default: 0 },
-    // Optional lock / unlock (can also be derived from milestones later)
-    isLocked: { type: Boolean, default: true },
-    // Detail brief (optional)
-    timeToComplete: { type: String }, // e.g. "72hrs"
-    overview: { type: String },
-    goal: { type: String },
-    techStack: [
-      {
-        layer: String,
-        technology: String,
-      },
-    ],
+    milestoneId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Milestone",
+      default: null,
+    },
+    title: { type: String, required: true },
+    description: String,
+    overview: String,
+    goal: String,
+    techStack: [String],
     architecture: [String],
-    submissions: [soloSubmissionSchema],
+    dueDate: Date,
+    order: { type: Number, default: 0 },
+    isLocked: { type: Boolean, default: true },
+    timeToComplete: String,
+    submissions: [submissionSchema],
   },
   { timestamps: true },
 );
 
-export default mongoose.model("Solo", soloSchema);
+export default mongoose.models.Solo || mongoose.model("Solo", soloSchema);
