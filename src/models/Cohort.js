@@ -2,11 +2,7 @@ import mongoose from "mongoose";
 
 const CohortSchema = new mongoose.Schema(
   {
-    name: {
-      type: String,
-      required: true,
-      trim: true,
-    },
+    name: { type: String, required: true, trim: true },
     code: {
       type: String,
       required: true,
@@ -14,44 +10,34 @@ const CohortSchema = new mongoose.Schema(
       lowercase: true,
       trim: true,
     },
-    description: {
-      type: String,
-      trim: true,
-      default: "",
-    },
-    startDate: {
-      type: Date,
+    description: { type: String, trim: true, default: "" },
+
+    // ── Link to Course ──────────────────────
+    courseId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Course",
       required: true,
     },
-    endDate: {
-      type: Date,
+
+    // ── Assigned Instructor ─────────────────
+    instructorId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
     },
-    // Course metadata (very useful for the frontend)
-    courseTitle: {
-      type: String,
-      default: "",
-      trim: true,
-    },
-    courseCategory: {
-      type: String,
-      default: "Software development",
-      trim: true,
-    },
-    icon: {
-      type: String,
-      default: "/badges/skyboss.png",
-    },
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
+
+    startDate: { type: Date, required: true },
+    endDate: { type: Date },
+
+    isActive: { type: Boolean, default: true },
+
     createdByAdminId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",
       required: true,
     },
   },
-  { timestamps: true }, // automatically adds createdAt + updatedAt
+  { timestamps: true },
 );
 
 export default mongoose.models.Cohort || mongoose.model("Cohort", CohortSchema);
