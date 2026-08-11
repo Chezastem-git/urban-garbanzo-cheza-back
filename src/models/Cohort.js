@@ -30,6 +30,16 @@ const CohortSchema = new mongoose.Schema(
     endDate: { type: Date },
 
     isActive: { type: Boolean, default: true },
+    
+    scheduleSlots: [
+      {
+        dayOfWeek: { type: Number, min: 0, max: 6 },
+        startTime: { type: String }, // "09:00"
+        endTime: { type: String },
+        label: { type: String, default: "Live class" },
+      },
+    ],
+    timezone: { type: String, default: "Africa/Nairobi" },
 
     createdByAdminId: {
       type: mongoose.Schema.Types.ObjectId,
