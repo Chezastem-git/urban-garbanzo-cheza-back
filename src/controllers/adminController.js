@@ -4,17 +4,19 @@ import jwt from "jsonwebtoken";
 import Admin from "../models/Admin.js";
 import User from "../models/User.js";
 import Cohort from "../models/Cohort.js";
+import Course from "../models/Course.js";
 import Milestone from "../models/Milestone.js";
 import Solo from "../models/Solo.js";
 import Assessment from "../models/Assessment.js";
-import ClassSession from "../models/ClassSession.js";
 import Attendance from "../models/Attendance.js";
-import { BadgeDefinition, StudentBadge } from "../models/Badge.js";
 import Notification from "../models/Notification.js";
-import ScheduleEvent from "../models/ScheduleEvent.js";
-import RecordedSession from "../models/RecordedSession.js";
-import Challenge from "../models/Challenge.js";
+import Certificate from "../models/Certificate.js";
+import GraduationSettings from "../models/GraduationSettings.js";
+import Segment from "../models/Segment.js";
 
+// ─────────────────────────────────────────────
+// AUTH
+// ─────────────────────────────────────────────
 
 export const registerAdmin = async (req, res) => {
   try {
@@ -69,12 +71,17 @@ export const adminLogin = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────
+// DASHBOARD
+// ─────────────────────────────────────────────
+
 export const getAdminDashboard = async (req, res) => {
   try {
     const [
       totalStudents,
       totalInstructors,
       totalCohorts,
+      totalCourses,
       activeStudents,
       suspendedStudents,
       pendingSolos,
@@ -83,6 +90,7 @@ export const getAdminDashboard = async (req, res) => {
       User.countDocuments({ role: "student" }),
       User.countDocuments({ role: "instructor" }),
       Cohort.countDocuments(),
+      Course.countDocuments(),
       User.countDocuments({
         role: "student",
         status: { $in: ["enrolled", "active"] },
@@ -105,6 +113,7 @@ export const getAdminDashboard = async (req, res) => {
         totalStudents,
         totalInstructors,
         totalCohorts,
+        totalCourses,
         activeStudents,
         suspendedStudents,
         pendingSoloSubmissions: pendingSolos[0]?.count || 0,
@@ -117,6 +126,165 @@ export const getAdminDashboard = async (req, res) => {
   }
 };
 
+// ─────────────────────────────────────────────
+// COURSES
+// ─────────────────────────────────────────────
+
+export const createCourse = async (req, res) => {
+  try {
+    const { title, slug, category, description, icon } = req.body;
+    if (!title || !slug) {
+      return res.status(400).json({ message: "title and slug are required." });
+    }
+
+    const existing = await Course.findOne({ slug: slug.toLowerCase() });
+    if (existing) {
+      return res.status(400).json({ message: "Course slug already exists." });
+    }
+
+    const course = await Course.create({
+      title,
+      slug: slug.toLowerCase(),
+      category,
+      description,
+      icon,
+      createdByAdminId: req.adminId,
+    });
+
+    res.status(201).json({ message: "Course created.", course });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to create course." });
+  }
+};
+
+export const getAllCourses = async (req, res) => {
+  try {
+    const courses = await Course.find().sort({ createdAt: -1 });
+
+    const result = await Promise.all(
+      courses.map(async (c) => {
+        const [milestones, solos, assessments, cohorts] = await Promise.all([
+          Milestone.countDocuments({ courseId: c._id }),
+          Solo.countDocuments({ courseId: c._id }),
+          Assessment.countDocuments({ courseId: c._id }),
+          Cohort.countDocuments({ courseId: c._id }),
+        ]);
+        return {
+          id: c._id,
+          title: c.title,
+          slug: c.slug,
+          category: c.category,
+          description: c.description,
+          icon: c.icon,
+          isActive: c.isActive,
+          milestonesCount: milestones,
+          solosCount: solos,
+          assessmentsCount: assessments,
+          cohortsCount: cohorts,
+          createdAt: c.createdAt,
+        };
+      }),
+    );
+
+    res.status(200).json({ courses: result });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch courses." });
+  }
+};
+
+// export const getCourseById = async (req, res) => {
+//   try {
+//     const course = await Course.findById(req.params.courseId);
+//     if (!course) return res.status(404).json({ message: "Course not found." });
+
+//     const [milestones, solos, assessments] = await Promise.all([
+//       Milestone.find({ courseId: course._id }).sort({ order: 1 }),
+//       Solo.find({ courseId: course._id }).sort({ order: 1 }),
+//       Assessment.find({ courseId: course._id }).sort({ order: 1 }),
+//     ]);
+
+//     res.status(200).json({ course, milestones, solos, assessments });
+//   } catch (err) {
+//     console.error(err);
+//     res.status(500).json({ message: "Failed to fetch course." });
+//   }
+// };
+
+export const getAllAssessments = async (req, res) => {
+  try {
+    const assessments = await Assessment.find()
+      .populate("courseId", "title slug")
+      .sort({ order: 1, createdAt: -1 });
+    res.status(200).json({ assessments });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch assessments." });
+  }
+};
+
+export const getAssessmentById = async (req, res) => {
+  try {
+    const assessment = await Assessment.findById(
+      req.params.assessmentId,
+    ).populate("courseId", "title slug");
+    if (!assessment) {
+      return res.status(404).json({ message: "Assessment not found." });
+    }
+    res.status(200).json({ assessment });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch assessment." });
+  }
+};
+
+export const updateCourse = async (req, res) => {
+  try {
+    const course = await Course.findByIdAndUpdate(
+      req.params.courseId,
+      req.body,
+      {
+        new: true,
+      },
+    );
+    if (!course) return res.status(404).json({ message: "Course not found." });
+    res.status(200).json({ message: "Course updated.", course });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update course." });
+  }
+};
+
+export const deleteCourse = async (req, res) => {
+  try {
+    const course = await Course.findById(req.params.courseId);
+    if (!course) return res.status(404).json({ message: "Course not found." });
+
+    const cohortCount = await Cohort.countDocuments({ courseId: course._id });
+    if (cohortCount > 0) {
+      return res.status(400).json({
+        message: `Cannot delete course used by ${cohortCount} cohort(s).`,
+      });
+    }
+
+    await Promise.all([
+      Milestone.deleteMany({ courseId: course._id }),
+      Solo.deleteMany({ courseId: course._id }),
+      Assessment.deleteMany({ courseId: course._id }),
+      Course.findByIdAndDelete(course._id),
+    ]);
+
+    res.status(200).json({ message: "Course and its content deleted." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to delete course." });
+  }
+};
+
+// ─────────────────────────────────────────────
+// COHORTS
+// ─────────────────────────────────────────────
 
 export const createCohort = async (req, res) => {
   try {
@@ -126,13 +294,27 @@ export const createCohort = async (req, res) => {
       description,
       startDate,
       endDate,
-      courseTitle,
-      courseCategory,
-      icon,
+      courseId,
+      instructorId,
     } = req.body;
 
-    if (!name || !code) {
-      return res.status(400).json({ message: "Name and code are required." });
+    if (!name || !code || !courseId || !startDate) {
+      return res.status(400).json({
+        message: "name, code, courseId and startDate are required.",
+      });
+    }
+
+    const course = await Course.findById(courseId);
+    if (!course) return res.status(404).json({ message: "Course not found." });
+
+    if (instructorId) {
+      const instructor = await User.findOne({
+        _id: instructorId,
+        role: "instructor",
+      });
+      if (!instructor) {
+        return res.status(404).json({ message: "Instructor not found." });
+      }
     }
 
     const existing = await Cohort.findOne({ code: code.toLowerCase() });
@@ -144,13 +326,16 @@ export const createCohort = async (req, res) => {
       name,
       code: code.toLowerCase(),
       description,
-      startDate: startDate ? new Date(startDate) : undefined,
+      startDate: new Date(startDate),
       endDate: endDate ? new Date(endDate) : undefined,
-      courseTitle,
-      courseCategory,
-      icon,
+      courseId,
+      instructorId: instructorId || null,
       createdByAdminId: req.adminId,
     });
+
+    if (instructorId) {
+      await User.findByIdAndUpdate(instructorId, { cohortId: cohort._id });
+    }
 
     res.status(201).json({ message: "Cohort created successfully.", cohort });
   } catch (err) {
@@ -161,18 +346,17 @@ export const createCohort = async (req, res) => {
 
 export const getAllCohorts = async (req, res) => {
   try {
-    const cohorts = await Cohort.find().sort({ startDate: -1 });
+    const cohorts = await Cohort.find()
+      .populate("courseId", "title slug category")
+      .populate("instructorId", "fullName email")
+      .sort({ startDate: -1 });
 
     const result = await Promise.all(
       cohorts.map(async (c) => {
-        const [students, instructors] = await Promise.all([
-          User.countDocuments({ cohortId: c._id, role: "student" }),
-          User.countDocuments({
-            $or: [{ cohortId: c._id }, { cohortIds: c._id }],
-            role: "instructor",
-          }),
-        ]);
-
+        const students = await User.countDocuments({
+          cohortId: c._id,
+          role: "student",
+        });
         return {
           id: c._id,
           name: c.name,
@@ -180,11 +364,10 @@ export const getAllCohorts = async (req, res) => {
           description: c.description,
           startDate: c.startDate,
           endDate: c.endDate,
-          courseTitle: c.courseTitle,
-          courseCategory: c.courseCategory,
-          icon: c.icon,
+          isActive: c.isActive,
+          course: c.courseId,
+          instructor: c.instructorId,
           totalStudents: students,
-          totalInstructors: instructors,
           createdAt: c.createdAt,
         };
       }),
@@ -199,23 +382,17 @@ export const getAllCohorts = async (req, res) => {
 
 export const getCohortById = async (req, res) => {
   try {
-    const cohort = await Cohort.findById(req.params.cohortId);
+    const cohort = await Cohort.findById(req.params.cohortId)
+      .populate("courseId")
+      .populate("instructorId", "fullName email avatar");
+
     if (!cohort) return res.status(404).json({ message: "Cohort not found." });
 
     const students = await User.find({ cohortId: cohort._id, role: "student" })
       .select("fullName email status avatar createdAt")
       .sort({ fullName: 1 });
 
-    const instructors = await User.find({
-      $or: [{ cohortId: cohort._id }, { cohortIds: cohort._id }],
-      role: "instructor",
-    }).select("fullName email status avatar");
-
-    res.status(200).json({
-      cohort,
-      students,
-      instructors,
-    });
+    res.status(200).json({ cohort, students });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to fetch cohort." });
@@ -229,26 +406,35 @@ export const updateCohort = async (req, res) => {
       description,
       startDate,
       endDate,
-      courseTitle,
-      courseCategory,
-      icon,
+      courseId,
+      instructorId,
+      isActive,
     } = req.body;
+
+    const updates = {};
+    if (name) updates.name = name;
+    if (description !== undefined) updates.description = description;
+    if (startDate) updates.startDate = new Date(startDate);
+    if (endDate) updates.endDate = new Date(endDate);
+    if (courseId) updates.courseId = courseId;
+    if (instructorId !== undefined) updates.instructorId = instructorId || null;
+    if (isActive !== undefined) updates.isActive = isActive;
 
     const cohort = await Cohort.findByIdAndUpdate(
       req.params.cohortId,
+      updates,
       {
-        ...(name && { name }),
-        ...(description !== undefined && { description }),
-        ...(startDate && { startDate: new Date(startDate) }),
-        ...(endDate && { endDate: new Date(endDate) }),
-        ...(courseTitle && { courseTitle }),
-        ...(courseCategory && { courseCategory }),
-        ...(icon && { icon }),
+        new: true,
       },
-      { new: true },
-    );
+    )
+      .populate("courseId", "title slug")
+      .populate("instructorId", "fullName email");
 
     if (!cohort) return res.status(404).json({ message: "Cohort not found." });
+
+    if (instructorId) {
+      await User.findByIdAndUpdate(instructorId, { cohortId: cohort._id });
+    }
 
     res.status(200).json({ message: "Cohort updated.", cohort });
   } catch (err) {
@@ -262,7 +448,6 @@ export const deleteCohort = async (req, res) => {
     const cohort = await Cohort.findById(req.params.cohortId);
     if (!cohort) return res.status(404).json({ message: "Cohort not found." });
 
-    // Optional safety: prevent deletion if students are attached
     const studentCount = await User.countDocuments({
       cohortId: cohort._id,
       role: "student",
@@ -280,6 +465,10 @@ export const deleteCohort = async (req, res) => {
     res.status(500).json({ message: "Failed to delete cohort." });
   }
 };
+
+// ─────────────────────────────────────────────
+// USERS
+// ─────────────────────────────────────────────
 
 export const provisionUser = async (req, res) => {
   try {
@@ -372,7 +561,10 @@ export const getUserById = async (req, res) => {
   try {
     const user = await User.findById(req.params.userId)
       .select("-passwordHash")
-      .populate("cohortId", "name code courseTitle");
+      .populate({
+        path: "cohortId",
+        populate: { path: "courseId", select: "title slug" },
+      });
 
     if (!user) return res.status(404).json({ message: "User not found." });
 
@@ -414,7 +606,6 @@ export const updateUserStatus = async (req, res) => {
     res.status(500).json({ message: "Failed to update status." });
   }
 };
-
 
 export const assignUserToCohort = async (req, res) => {
   try {
@@ -473,278 +664,6 @@ export const resetUserPassword = async (req, res) => {
   }
 };
 
-export const createMilestone = async (req, res) => {
-  try {
-    const {
-      cohortId,
-      title,
-      description,
-      order,
-      duration,
-      topics,
-      isUnlocked,
-    } = req.body;
-
-    if (!cohortId || !title) {
-      return res
-        .status(400)
-        .json({ message: "cohortId and title are required." });
-    }
-
-    const cohort = await Cohort.findById(cohortId);
-    if (!cohort) return res.status(404).json({ message: "Cohort not found." });
-
-    const milestone = await Milestone.create({
-      cohortId,
-      title,
-      description,
-      order: order ?? 0,
-      duration,
-      topics: topics || [],
-      isUnlocked: Boolean(isUnlocked),
-    });
-
-    res.status(201).json({ message: "Milestone created.", milestone });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to create milestone." });
-  }
-};
-
-export const updateMilestone = async (req, res) => {
-  try {
-    const updates = req.body;
-    const milestone = await Milestone.findByIdAndUpdate(
-      req.params.milestoneId,
-      updates,
-      {
-        new: true,
-      },
-    );
-    if (!milestone)
-      return res.status(404).json({ message: "Milestone not found." });
-    res.status(200).json({ message: "Milestone updated.", milestone });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to update milestone." });
-  }
-};
-
-export const unlockMilestone = async (req, res) => {
-  try {
-    const milestone = await Milestone.findByIdAndUpdate(
-      req.params.milestoneId,
-      { isUnlocked: true },
-      { new: true },
-    );
-    if (!milestone)
-      return res.status(404).json({ message: "Milestone not found." });
-    res.status(200).json({ message: "Milestone unlocked.", milestone });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to unlock milestone." });
-  }
-};
-
-export const createSolo = async (req, res) => {
-  try {
-    const {
-      cohortId,
-      title,
-      description,
-      dueDate,
-      order,
-      isLocked,
-      timeToComplete,
-      overview,
-      goal,
-      techStack,
-      architecture,
-    } = req.body;
-
-    if (!cohortId || !title) {
-      return res
-        .status(400)
-        .json({ message: "cohortId and title are required." });
-    }
-
-    const solo = await Solo.create({
-      cohortId,
-      title,
-      description,
-      dueDate: dueDate ? new Date(dueDate) : undefined,
-      order: order ?? 0,
-      isLocked: Boolean(isLocked),
-      timeToComplete,
-      overview,
-      goal,
-      techStack: techStack || [],
-      architecture: architecture || [],
-      submissions: [],
-    });
-
-    res.status(201).json({ message: "Solo created.", solo });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to create solo." });
-  }
-};
-
-export const createAssessment = async (req, res) => {
-  try {
-    const {
-      cohortId,
-      title,
-      description,
-      durationMinutes,
-      questions,
-      isLocked,
-      order,
-    } = req.body;
-
-    if (!cohortId || !title) {
-      return res
-        .status(400)
-        .json({ message: "cohortId and title are required." });
-    }
-
-    const assessment = await Assessment.create({
-      cohortId,
-      title,
-      description,
-      durationMinutes: durationMinutes || 15,
-      questions: questions || [],
-      isLocked: Boolean(isLocked),
-      order: order ?? 0,
-      attempts: [],
-    });
-
-    res.status(201).json({ message: "Assessment created.", assessment });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to create assessment." });
-  }
-};
-
-export const evaluateGraduationEligibility = async (req, res) => {
-  try {
-    const student = await User.findById(req.params.studentId);
-    if (!student || student.role !== "student") {
-      return res.status(404).json({ message: "Student not found." });
-    }
-    if (!student.cohortId) {
-      return res.status(400).json({ message: "Student has no cohort." });
-    }
-
-    const [milestones, attendanceRecords, solos] = await Promise.all([
-      Milestone.find({ cohortId: student.cohortId }),
-      Attendance.find({ studentId: student._id, cohortId: student.cohortId }),
-      Solo.find({ cohortId: student.cohortId }),
-    ]);
-
-    const unlocked = milestones.filter((m) => m.isUnlocked).length;
-    const progress =
-      milestones.length > 0
-        ? Math.round((unlocked / milestones.length) * 100)
-        : 0;
-
-    const present = attendanceRecords.filter(
-      (r) => r.status === "present" || r.status === "late",
-    ).length;
-    const attendancePct =
-      attendanceRecords.length > 0
-        ? Math.round((present / attendanceRecords.length) * 100)
-        : 0;
-
-    let bestSoloScore = 0;
-    for (const solo of solos) {
-      const sub = solo.submissions?.find(
-        (s) =>
-          s.studentId.toString() === student._id.toString() &&
-          s.status === "graded",
-      );
-      if (sub) {
-        const score = sub.scorePercentage ?? sub.totalScore ?? sub.score ?? 0;
-        if (score > bestSoloScore) bestSoloScore = score;
-      }
-    }
-
-    const eligible =
-      progress >= 80 &&
-      attendancePct >= 75 &&
-      bestSoloScore >= 60 &&
-      ["enrolled", "active"].includes(student.status);
-
-    res.status(200).json({
-      studentId: student._id,
-      fullName: student.fullName,
-      eligible,
-      metrics: {
-        progress,
-        attendancePct,
-        bestSoloScore,
-        status: student.status,
-      },
-      criteria: {
-        minProgress: 80,
-        minAttendance: 75,
-        minSoloScore: 60,
-      },
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to evaluate eligibility." });
-  }
-};
-
-export const graduateStudent = async (req, res) => {
-  try {
-    const student = await User.findById(req.params.studentId);
-    if (!student || student.role !== "student") {
-      return res.status(404).json({ message: "Student not found." });
-    }
-
-    // Re-use the same logic (or force with ?force=true)
-    const force = req.query.force === "true";
-
-    if (!force) {
-      // Quick eligibility check
-      const eligibilityRes = await evaluateGraduationEligibility(
-        { params: { studentId: student._id } },
-        { status: () => ({ json: () => {} }) }, // dummy – better to extract logic later
-      );
-      // For simplicity we trust the admin UI to call evaluate first.
-    }
-
-    student.status = "graduated";
-    await student.save();
-
-    // Optional: create a notification
-    await Notification.create({
-      studentId: student._id,
-      cohortId: student.cohortId,
-      sender: "Administration",
-      message:
-        "Congratulations! You have successfully graduated from the program.",
-      type: "system",
-      bgColor: "bg-green-500",
-    });
-
-    res.status(200).json({
-      message: "Student marked as graduated.",
-      student: {
-        id: student._id,
-        fullName: student.fullName,
-        status: student.status,
-      },
-    });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Failed to graduate student." });
-  }
-};
-
-
 export const bulkAssignStudentsToCohort = async (req, res) => {
   try {
     const { studentIds, cohortId } = req.body;
@@ -769,5 +688,605 @@ export const bulkAssignStudentsToCohort = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Bulk assignment failed." });
+  }
+};
+
+// ─────────────────────────────────────────────
+// CONTENT (courseId)
+// ─────────────────────────────────────────────
+
+export const createMilestone = async (req, res) => {
+  try {
+    const {
+      courseId,
+      title,
+      description,
+      order,
+      duration,
+      topics,
+      isUnlocked,
+      soloId,
+    } = req.body;
+
+    if (!courseId || !title) {
+      return res
+        .status(400)
+        .json({ message: "courseId and title are required." });
+    }
+
+    const course = await Course.findById(courseId);
+    if (!course) return res.status(404).json({ message: "Course not found." });
+
+    const milestone = await Milestone.create({
+      courseId,
+      title,
+      description,
+      order: order ?? 0,
+      duration,
+      topics: topics || [],
+      isUnlocked: Boolean(isUnlocked),
+      soloId: soloId || null,
+    });
+
+    res.status(201).json({ message: "Milestone created.", milestone });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to create milestone." });
+  }
+};
+
+export const updateMilestone = async (req, res) => {
+  try {
+    const milestone = await Milestone.findByIdAndUpdate(
+      req.params.milestoneId,
+      req.body,
+      { new: true },
+    );
+    if (!milestone) {
+      return res.status(404).json({ message: "Milestone not found." });
+    }
+    res.status(200).json({ message: "Milestone updated.", milestone });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update milestone." });
+  }
+};
+
+export const unlockMilestone = async (req, res) => {
+  try {
+    const milestone = await Milestone.findByIdAndUpdate(
+      req.params.milestoneId,
+      { isUnlocked: true },
+      { new: true },
+    );
+    if (!milestone) {
+      return res.status(404).json({ message: "Milestone not found." });
+    }
+    res.status(200).json({ message: "Milestone unlocked.", milestone });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to unlock milestone." });
+  }
+};
+
+export const createSolo = async (req, res) => {
+  try {
+    const {
+      courseId,
+      milestoneId,
+      title,
+      description,
+      dueDate,
+      order,
+      isLocked,
+      timeToComplete,
+      overview,
+      goal,
+      techStack,
+      architecture,
+    } = req.body;
+
+    if (!courseId || !title) {
+      return res
+        .status(400)
+        .json({ message: "courseId and title are required." });
+    }
+
+    const solo = await Solo.create({
+      courseId,
+      milestoneId: milestoneId || null,
+      title,
+      description,
+      dueDate: dueDate ? new Date(dueDate) : undefined,
+      order: order ?? 0,
+      isLocked: Boolean(isLocked),
+      timeToComplete,
+      overview,
+      goal,
+      techStack: techStack || [],
+      architecture: architecture || [],
+      submissions: [],
+    });
+
+    if (milestoneId) {
+      await Milestone.findByIdAndUpdate(milestoneId, { soloId: solo._id });
+    }
+
+    res.status(201).json({ message: "Solo created.", solo });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to create solo." });
+  }
+};
+
+export const createAssessment = async (req, res) => {
+  try {
+    const {
+      courseId,
+      title,
+      description,
+      durationMinutes,
+      questions,
+      isLocked,
+      order,
+    } = req.body;
+
+    if (!courseId || !title) {
+      return res
+        .status(400)
+        .json({ message: "courseId and title are required." });
+    }
+
+    const assessment = await Assessment.create({
+      courseId,
+      title,
+      description,
+      durationMinutes: durationMinutes || 15,
+      questions: questions || [],
+      isLocked: Boolean(isLocked),
+      order: order ?? 0,
+      attempts: [],
+    });
+
+    res.status(201).json({ message: "Assessment created.", assessment });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to create assessment." });
+  }
+};
+
+// ─────────────────────────────────────────────
+// GRADUATION SETTINGS
+// ─────────────────────────────────────────────
+
+export const getGraduationSettings = async (req, res) => {
+  try {
+    const { courseId } = req.query;
+
+    let settings = null;
+    if (courseId) {
+      settings = await GraduationSettings.findOne({ courseId });
+    }
+    if (!settings) {
+      settings = await GraduationSettings.findOne({ courseId: null });
+    }
+
+    if (!settings) {
+      return res.status(200).json({
+        settings: {
+          courseId: courseId || null,
+          minMilestoneProgress: 100,
+          minSoloAverage: 60,
+          minAssessmentAverage: 60,
+          mustCompleteAllAssessments: true,
+          requireAllSolosGraded: false,
+          minAttendancePct: 0,
+        },
+        isDefault: true,
+      });
+    }
+
+    res.status(200).json({ settings, isDefault: false });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch graduation settings." });
+  }
+};
+
+export const updateGraduationSettings = async (req, res) => {
+  try {
+    const {
+      courseId = null,
+      minMilestoneProgress,
+      minSoloAverage,
+      minAssessmentAverage,
+      mustCompleteAllAssessments,
+      requireAllSolosGraded,
+      minAttendancePct,
+    } = req.body;
+
+    if (courseId) {
+      const course = await Course.findById(courseId);
+      if (!course) {
+        return res.status(404).json({ message: "Course not found." });
+      }
+    }
+
+    const payload = { updatedByAdminId: req.adminId };
+
+    if (minMilestoneProgress !== undefined)
+      payload.minMilestoneProgress = Number(minMilestoneProgress);
+    if (minSoloAverage !== undefined)
+      payload.minSoloAverage = Number(minSoloAverage);
+    if (minAssessmentAverage !== undefined)
+      payload.minAssessmentAverage = Number(minAssessmentAverage);
+    if (mustCompleteAllAssessments !== undefined)
+      payload.mustCompleteAllAssessments = Boolean(mustCompleteAllAssessments);
+    if (requireAllSolosGraded !== undefined)
+      payload.requireAllSolosGraded = Boolean(requireAllSolosGraded);
+    if (minAttendancePct !== undefined)
+      payload.minAttendancePct = Number(minAttendancePct);
+
+    const filter = courseId ? { courseId } : { courseId: null };
+
+    const settings = await GraduationSettings.findOneAndUpdate(
+      filter,
+      { $set: payload, $setOnInsert: { courseId: courseId || null } },
+      { upsert: true, new: true, runValidators: true },
+    );
+
+    res.status(200).json({ message: "Graduation settings updated.", settings });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update graduation settings." });
+  }
+};
+
+// ─────────────────────────────────────────────
+// GRADUATION
+// ─────────────────────────────────────────────
+
+export const evaluateGraduationEligibility = async (req, res) => {
+  try {
+    const student = await User.findById(req.params.studentId);
+    if (!student || student.role !== "student") {
+      return res.status(404).json({ message: "Student not found." });
+    }
+    if (!student.cohortId) {
+      return res.status(400).json({ message: "Student has no cohort." });
+    }
+
+    const cohort = await Cohort.findById(student.cohortId).populate("courseId");
+    if (!cohort?.courseId) {
+      return res
+        .status(400)
+        .json({ message: "Cohort has no course assigned." });
+    }
+
+    const courseId = cohort.courseId._id || cohort.courseId;
+
+    let settings = await GraduationSettings.findOne({ courseId });
+    if (!settings) {
+      settings = await GraduationSettings.findOne({ courseId: null });
+    }
+    if (!settings) {
+      settings = {
+        minMilestoneProgress: 100,
+        minSoloAverage: 60,
+        minAssessmentAverage: 60,
+        mustCompleteAllAssessments: true,
+        requireAllSolosGraded: false,
+        minAttendancePct: 0,
+      };
+    }
+
+    const [milestones, solos, assessments, attendanceRecords] =
+      await Promise.all([
+        Milestone.find({ courseId }).sort({ order: 1 }),
+        Solo.find({ courseId }),
+        Assessment.find({ courseId }),
+        settings.minAttendancePct > 0
+          ? Attendance.find({
+              studentId: student._id,
+              cohortId: student.cohortId,
+            })
+          : Promise.resolve([]),
+      ]);
+
+    const unlocked = milestones.filter((m) => m.isUnlocked).length;
+    const milestoneProgress =
+      milestones.length > 0
+        ? Math.round((unlocked / milestones.length) * 100)
+        : 0;
+
+    const soloScores = [];
+    let gradedSoloCount = 0;
+    for (const solo of solos) {
+      const sub = solo.submissions?.find(
+        (s) =>
+          s.studentId.toString() === student._id.toString() &&
+          s.status === "graded",
+      );
+      if (sub) {
+        gradedSoloCount += 1;
+        soloScores.push(sub.scorePercentage ?? sub.totalScore ?? 0);
+      }
+    }
+    const soloAverage =
+      soloScores.length > 0
+        ? Math.round(soloScores.reduce((a, b) => a + b, 0) / soloScores.length)
+        : 0;
+
+    const assessmentScores = [];
+    for (const a of assessments) {
+      const attempt = a.attempts?.find(
+        (att) =>
+          att.studentId.toString() === student._id.toString() &&
+          att.status === "completed",
+      );
+      if (attempt && typeof attempt.scorePercentage === "number") {
+        assessmentScores.push(attempt.scorePercentage);
+      }
+    }
+    const assessmentAverage =
+      assessmentScores.length > 0
+        ? Math.round(
+            assessmentScores.reduce((a, b) => a + b, 0) /
+              assessmentScores.length,
+          )
+        : 0;
+
+    const assessmentsCompleted = assessmentScores.length;
+    const totalAssessments = assessments.length;
+    const totalSolos = solos.length;
+
+    let attendancePct = 0;
+    if (settings.minAttendancePct > 0 && attendanceRecords.length > 0) {
+      const present = attendanceRecords.filter(
+        (r) => r.status === "present" || r.status === "late",
+      ).length;
+      attendancePct = Math.round((present / attendanceRecords.length) * 100);
+    }
+
+    const eligible =
+      milestoneProgress >= settings.minMilestoneProgress &&
+      soloAverage >= settings.minSoloAverage &&
+      assessmentAverage >= settings.minAssessmentAverage &&
+      (!settings.mustCompleteAllAssessments ||
+        assessmentsCompleted === totalAssessments) &&
+      (!settings.requireAllSolosGraded || gradedSoloCount === totalSolos) &&
+      (settings.minAttendancePct <= 0 ||
+        attendancePct >= settings.minAttendancePct) &&
+      ["enrolled", "active"].includes(student.status);
+
+    res.status(200).json({
+      studentId: student._id,
+      fullName: student.fullName,
+      courseTitle: cohort.courseId.title,
+      eligible,
+      metrics: {
+        milestoneProgress,
+        soloAverage,
+        assessmentAverage,
+        assessmentsCompleted,
+        totalAssessments,
+        gradedSoloCount,
+        totalSolos,
+        attendancePct,
+        status: student.status,
+      },
+      criteria: {
+        minMilestoneProgress: settings.minMilestoneProgress,
+        minSoloAverage: settings.minSoloAverage,
+        minAssessmentAverage: settings.minAssessmentAverage,
+        mustCompleteAllAssessments: settings.mustCompleteAllAssessments,
+        requireAllSolosGraded: settings.requireAllSolosGraded,
+        minAttendancePct: settings.minAttendancePct,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to evaluate eligibility." });
+  }
+};
+
+export const graduateStudent = async (req, res) => {
+  try {
+    const student = await User.findById(req.params.studentId);
+    if (!student || student.role !== "student") {
+      return res.status(404).json({ message: "Student not found." });
+    }
+
+    const cohort = await Cohort.findById(student.cohortId).populate("courseId");
+    if (!cohort) {
+      return res.status(400).json({ message: "Student has no valid cohort." });
+    }
+
+    const certNumber = `CHEZA-${new Date().getFullYear()}-${student._id
+      .toString()
+      .slice(-6)
+      .toUpperCase()}`;
+
+    await Certificate.findOneAndUpdate(
+      { studentId: student._id, cohortId: cohort._id },
+      {
+        studentId: student._id,
+        cohortId: cohort._id,
+        certificateNumber: certNumber,
+        studentName: student.fullName,
+        courseTitle: cohort.courseId?.title || "Course",
+        cohortName: cohort.name,
+        issuedByAdminId: req.adminId,
+        issuedAt: new Date(),
+        status: "issued",
+      },
+      { upsert: true, new: true },
+    );
+
+    student.status = "graduated";
+    student.graduatedAt = new Date();
+    await student.save();
+
+    await Notification.create({
+      studentId: student._id,
+      cohortId: student.cohortId,
+      sender: "Administration",
+      message: "Congratulations! You have successfully graduated.",
+      type: "system",
+      bgColor: "bg-green-500",
+    });
+
+    res.status(200).json({
+      message: "Student graduated and certificate issued.",
+      student: {
+        id: student._id,
+        fullName: student.fullName,
+        status: student.status,
+      },
+      certificateNumber: certNumber,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to graduate student." });
+  }
+};
+
+export const getCourseById = async (req, res) => {
+  try {
+    const course = await Course.findById(req.params.courseId);
+    if (!course) return res.status(404).json({ message: "Course not found." });
+
+    const [milestones, solos, assessments] = await Promise.all([
+      Milestone.find({ courseId: course._id }).sort({ order: 1 }),
+      Solo.find({ courseId: course._id }).sort({ order: 1 }),
+      Assessment.find({ courseId: course._id }).sort({ order: 1 }),
+    ]);
+
+    const milestoneIds = milestones.map((m) => m._id);
+    const segmentCounts = await Segment.aggregate([
+      { $match: { milestoneId: { $in: milestoneIds } } },
+      { $group: { _id: "$milestoneId", count: { $sum: 1 } } },
+    ]);
+    const countMap = Object.fromEntries(
+      segmentCounts.map((s) => [s._id.toString(), s.count]),
+    );
+
+    const milestonesWithCounts = milestones.map((m) => ({
+      ...m.toObject(),
+      segmentsCount: countMap[m._id.toString()] || 0,
+    }));
+
+    res.status(200).json({
+      course,
+      milestones: milestonesWithCounts,
+      solos,
+      assessments,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch course." });
+  }
+};
+
+// GET /admin/milestones/:milestoneId
+export const getMilestoneById = async (req, res) => {
+  try {
+    const milestone = await Milestone.findById(req.params.milestoneId).populate(
+      "soloId",
+      "title",
+    );
+    if (!milestone) {
+      return res.status(404).json({ message: "Milestone not found." });
+    }
+
+    const segments = await Segment.find({ milestoneId: milestone._id }).sort({
+      order: 1,
+    });
+
+    res.status(200).json({ milestone, segments });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch milestone." });
+  }
+};
+
+// POST /admin/segments
+export const createSegment = async (req, res) => {
+  try {
+    const { milestoneId, title, order, pages } = req.body;
+    if (!milestoneId || !title) {
+      return res
+        .status(400)
+        .json({ message: "milestoneId and title are required." });
+    }
+
+    const milestone = await Milestone.findById(milestoneId);
+    if (!milestone) {
+      return res.status(404).json({ message: "Milestone not found." });
+    }
+
+    const segment = await Segment.create({
+      courseId: milestone.courseId,
+      milestoneId,
+      title,
+      order: order ?? 0,
+      pages: pages || [],
+    });
+
+    res.status(201).json({ message: "Segment created.", segment });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to create segment." });
+  }
+};
+
+// GET /admin/segments/:segmentId
+export const getSegmentById = async (req, res) => {
+  try {
+    const segment = await Segment.findById(req.params.segmentId);
+    if (!segment) {
+      return res.status(404).json({ message: "Segment not found." });
+    }
+    res.status(200).json({ segment });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch segment." });
+  }
+};
+
+// PATCH /admin/segments/:segmentId  — title, order, or full pages[]
+export const updateSegment = async (req, res) => {
+  try {
+    const { title, order, pages } = req.body;
+    const updates = {};
+    if (title !== undefined) updates.title = title;
+    if (order !== undefined) updates.order = order;
+    if (pages !== undefined) updates.pages = pages;
+
+    const segment = await Segment.findByIdAndUpdate(
+      req.params.segmentId,
+      updates,
+      { new: true },
+    );
+    if (!segment) {
+      return res.status(404).json({ message: "Segment not found." });
+    }
+    res.status(200).json({ message: "Segment updated.", segment });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update segment." });
+  }
+};
+
+export const deleteSegment = async (req, res) => {
+  try {
+    const segment = await Segment.findByIdAndDelete(req.params.segmentId);
+    if (!segment) {
+      return res.status(404).json({ message: "Segment not found." });
+    }
+    res.status(200).json({ message: "Segment deleted." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to delete segment." });
   }
 };
