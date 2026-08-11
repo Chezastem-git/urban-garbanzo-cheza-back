@@ -32,10 +32,16 @@ import {
   createSegment,
   getSegmentById,
   updateSegment,
-
   getAllAssessments,
   getAssessmentById,
   deleteSegment,
+  updateCohortSchedule,
+  generateClassSessions,
+  getClassSessions,
+  getClassSessionById,
+  getSoloById,
+  updateSolo,
+  updateAssessment,
 } from "../controllers/adminController.js";
 import { requireAdmin } from "../middleware/adminAuth.js";
 import { Router } from "express";
@@ -74,6 +80,11 @@ router.get("/cohorts/:cohortId", getCohortById);
 router.patch("/cohorts/:cohortId", updateCohort);
 router.delete("/cohorts/:cohortId", deleteCohort);
 
+router.patch("/cohorts/:cohortId/schedule", updateCohortSchedule);
+router.post("/cohorts/:cohortId/sessions/generate", generateClassSessions);
+router.get("/class-sessions", getClassSessions);
+router.get("/class-sessions/:sessionId", getClassSessionById);
+
 // Users
 router.post("/users/provision", provisionUser);
 router.get("/users", getAllUsers);
@@ -89,11 +100,18 @@ router.patch("/milestones/:milestoneId", updateMilestone);
 router.patch("/milestones/:milestoneId/unlock", unlockMilestone);
 router.post("/solos", createSolo);
 router.post("/assessments", createAssessment);
+router.patch("/assessments/:assessmentId", updateAssessment);
+
+// Solos
+router.get("/solos/:soloId", getSoloById);
+router.patch("/solos/:soloId", updateSolo);
 
 // Graduation
 router.get("/graduation-settings", getGraduationSettings);
 router.put("/graduation-settings", updateGraduationSettings);
 router.get("/students/:studentId/eligibility", evaluateGraduationEligibility);
 router.post("/students/:studentId/graduate", graduateStudent);
+
+//
 
 export default router;
