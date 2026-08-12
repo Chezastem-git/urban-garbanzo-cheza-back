@@ -3,6 +3,7 @@ import Milestone from "../models/Milestone.js";
 import Solo from "../models/Solo.js";
 import Assessment from "../models/Assessment.js";
 import RecordedSession from "../models/RecordedSession.js";
+import ClassSession from "../models/ClassSession.js";
 import User from "../models/User.js";
 
 import Notification from "../models/Notification.js";
@@ -10,22 +11,58 @@ import ScheduleEvent from "../models/ScheduleEvent.js";
 import Challenge from "../models/Challenge.js";
 import { BadgeDefinition, StudentBadge } from "../models/Badge.js";
 import Attendance from "../models/Attendance.js";
+import Segment from "../models/Segment.js";
 
-// Fetch Student Milestones & Segments
-export const getStudentMilestones = async (req, res) => {
-  try {
-    const user = await User.findById(req.userId);
-    if (!user?.cohortId)
-      return res.status(404).json({ message: "No cohort assigned." });
-
-    const milestones = await Milestone.find({ cohortId: user.cohortId }).sort({
-      order: 1,
-    });
-    res.status(200).json({ milestones });
-  } catch {
-    res.status(500).json({ message: "Error fetching milestones." });
+function toDateKey(value) {
+  if (!value) return null;
+  if (typeof value === "string") {
+    return value.slice(0, 10);
   }
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+const CLASS_THEME = {
+  primary: "#1ACC7A",
+  accent: "#34D399",
+  bgLight: "rgba(16, 185, 129, 0.12)",
+  border: "rgba(16, 185, 129, 0.28)",
+  text: "#047857",
+  badgeBg: "rgba(16, 185, 129, 0.18)",
 };
+// Fetch Student Milestones & Segments
+async function getStudentContext(userId) {
+  const user = await User.findById(userId).populate({
+    path: "cohortId",
+    populate: {
+      path: "courseId",
+      select: "title category slug description icon isActive",
+    },
+  });
+
+  if (!user) return { error: { status: 404, message: "User not found." } };
+
+  const cohort = user.cohortId;
+  if (!cohort) {
+    return {
+      user,
+      cohort: null,
+      course: null,
+      cohortId: null,
+      courseId: null,
+      error: { status: 404, message: "No cohort assigned." },
+    };
+  }
+
+  const course = cohort.courseId || null;
+  const cohortId = cohort._id;
+  const courseId = course?._id || course || null;
+
+  return { user, cohort, course, cohortId, courseId, error: null };
+}
 
 export const clearStudentNotifications = async (req, res) => {
   try {
@@ -42,25 +79,57 @@ export const clearStudentNotifications = async (req, res) => {
 // Fetch Student Solos & Submissions
 export const getStudentSolos = async (req, res) => {
   try {
-    const user = await User.findById(req.userId);
-    const solos = await Solo.find({ cohortId: user.cohortId });
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
+    }
+    if (!ctx.courseId) {
+      return res
+        .status(404)
+        .json({ message: "Cohort has no course assigned." });
+    }
 
-    // Attach current student's specific submission status
-    const formattedSolos = solos.map((solo) => {
-      const submission = solo.submissions.find(
-        (s) => s.studentId.toString() === req.userId,
-      );
-      return {
-        _id: solo._id,
-        title: solo.title,
-        description: solo.description,
-        dueDate: solo.dueDate,
-        mySubmission: submission || null,
-      };
+    const solos = await Solo.find({ courseId: ctx.courseId }).sort({
+      order: 1,
     });
 
+    const formattedSolos = await Promise.all(
+      solos.map(async (solo) => {
+        const submission = solo.submissions?.find(
+          (s) => s.studentId.toString() === req.userId,
+        );
+
+        let isLocked = true;
+
+        if (solo.milestoneId) {
+          const segments = await Segment.find({
+            milestoneId: solo.milestoneId,
+          });
+          // Unlock when there is at least one segment and all are complete
+          if (segments.length > 0 && segments.every((s) => s.isCompleted)) {
+            isLocked = false;
+          }
+        } else {
+          // Legacy solos with no milestone — fall back to stored flag
+          isLocked = Boolean(solo.isLocked);
+        }
+
+        return {
+          _id: solo._id,
+          title: solo.title,
+          description: solo.description,
+          dueDate: solo.dueDate,
+          order: solo.order,
+          milestoneId: solo.milestoneId || null,
+          isLocked,
+          mySubmission: submission || null,
+        };
+      }),
+    );
+
     res.status(200).json({ solos: formattedSolos });
-  } catch {
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ message: "Error fetching solos." });
   }
 };
@@ -72,8 +141,16 @@ export const submitSolo = async (req, res) => {
     const { repositoryUrl, liveDemoUrl, notes } = req.body;
 
     const solo = await Solo.findById(soloId);
-    if (!solo)
+    if (!solo) {
       return res.status(404).json({ message: "Solo project not found." });
+    }
+
+    // Must be unlocked (all segments done)
+    if (solo.isLocked) {
+      return res.status(403).json({
+        message: "Solo is still locked. Complete all segments first.",
+      });
+    }
 
     const existingIndex = solo.submissions.findIndex(
       (s) => s.studentId.toString() === req.userId,
@@ -92,10 +169,29 @@ export const submitSolo = async (req, res) => {
         status: "pending",
       });
     }
-
     await solo.save();
-    res.status(200).json({ message: "Solo project submitted successfully." });
-  } catch {
+
+    // Unlock NEXT milestone after solo is submitted
+    if (solo.milestoneId) {
+      const current = await Milestone.findById(solo.milestoneId);
+      if (current) {
+        const next = await Milestone.findOne({
+          courseId: current.courseId,
+          order: { $gt: current.order ?? 0 },
+        }).sort({ order: 1 });
+
+        if (next) {
+          next.isUnlocked = true;
+          await next.save();
+        }
+      }
+    }
+
+    res.status(200).json({
+      message: "Solo submitted. Next milestone unlocked (if any).",
+    });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ message: "Failed to submit solo project." });
   }
 };
@@ -145,17 +241,22 @@ export const getRecordedSessions = async (req, res) => {
 // List assessments for the student's cohort + their attempt status
 export const getStudentAssessments = async (req, res) => {
   try {
-    const user = await User.findById(req.userId);
-    if (!user?.cohortId) {
-      return res.status(404).json({ message: "No cohort assigned." });
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
+    }
+    if (!ctx.courseId) {
+      return res
+        .status(404)
+        .json({ message: "Cohort has no course assigned." });
     }
 
-    const assessments = await Assessment.find({
-      cohortId: user.cohortId,
-    }).sort({ order: 1 });
+    const assessments = await Assessment.find({ courseId: ctx.courseId }).sort({
+      order: 1,
+    });
 
     const formatted = assessments.map((a) => {
-      const attempt = a.attempts.find(
+      const attempt = a.attempts?.find(
         (att) => att.studentId.toString() === req.userId,
       );
 
@@ -176,7 +277,6 @@ export const getStudentAssessments = async (req, res) => {
         status,
         completionPercentage:
           attempt?.status === "completed" ? attempt.scorePercentage : undefined,
-        // Do not send correct answers in the list
       };
     });
 
@@ -196,30 +296,61 @@ export const getStudentAssessmentById = async (req, res) => {
       return res.status(404).json({ message: "Assessment not found." });
     }
 
-    const user = await User.findById(req.userId);
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
+    }
     if (
-      !user?.cohortId ||
-      assessment.cohortId.toString() !== user.cohortId.toString()
+      !ctx.courseId ||
+      assessment.courseId?.toString() !== ctx.courseId.toString()
     ) {
       return res.status(403).json({ message: "Not allowed." });
     }
 
-    const attempt = assessment.attempts.find(
+    const attempt = assessment.attempts?.find(
       (att) => att.studentId.toString() === req.userId,
     );
 
-    // Strip correct answers when sending to client for taking the quiz
-    // (or include them if you prefer client-side scoring like your mock)
-    const questions = assessment.questions.map((q, idx) => ({
-      id: idx,
-      question: q.questionText,
-      options: q.options,
-      // Optional: omit correctOptionIndex for stricter security
-      correctIdx: q.correctOptionIndex,
-    }));
+    const rawQuestions = assessment.questions || [];
+
+    const questions = rawQuestions.map((q, idx) => {
+      // Normalise type from schema: "mcq" | "short" | "long"
+      const type =
+        q.type ||
+        (Array.isArray(q.options) && q.options.length > 0 ? "mcq" : "short");
+
+      const options = Array.isArray(q.options) ? q.options.map(String) : [];
+
+      const correctIdx =
+        typeof q.correctOptionIndex === "number"
+          ? q.correctOptionIndex
+          : typeof q.correctIdx === "number"
+            ? q.correctIdx
+            : null;
+
+      const questionText =
+        q.prompt ||
+        q.questionText ||
+        q.question ||
+        q.title ||
+        q.text ||
+        q.body ||
+        `Question ${idx + 1}`;
+
+      return {
+        id: q._id ?? q.id ?? idx,
+        type, // "mcq" | "short" | "long"
+        question: questionText,
+        options, // only meaningful for mcq
+        correctIdx, // only for mcq (frontend can ignore it)
+        points: q.points ?? 1,
+        // never send expectedAnswer to the student
+      };
+    });
 
     res.status(200).json({
       _id: assessment._id,
+      id: assessment._id,
       title: assessment.title,
       description: assessment.description,
       durationMinutes: assessment.durationMinutes,
@@ -237,48 +368,120 @@ export const getStudentAssessmentById = async (req, res) => {
 export const submitAssessment = async (req, res) => {
   try {
     const { assessmentId } = req.params;
-    const { answers, scorePercentage } = req.body; // answers: number[]
+    const { answers, scorePercentage } = req.body;
+    // answers can still arrive as a flat array from the current frontend:
+    // [0, "some text", 2, …]  OR already as objects
 
     const assessment = await Assessment.findById(assessmentId);
     if (!assessment) {
       return res.status(404).json({ message: "Assessment not found." });
     }
 
-    // Prefer server-side scoring if answers provided
-    let finalScore = scorePercentage;
-    if (Array.isArray(answers) && assessment.questions.length > 0) {
-      let correct = 0;
-      assessment.questions.forEach((q, idx) => {
-        if (answers[idx] === q.correctOptionIndex) correct++;
-      });
-      finalScore = Math.round((correct / assessment.questions.length) * 100);
-    }
+    const questions = assessment.questions || [];
+    let earnedPoints = 0;
+    let totalPoints = 0;
 
-    if (typeof finalScore !== "number") {
-      return res.status(400).json({ message: "Score or answers required." });
-    }
+    // Build proper attemptAnswer documents
+    const structuredAnswers = questions.map((q, idx) => {
+      const raw = Array.isArray(answers) ? answers[idx] : null;
+      const points = typeof q.points === "number" ? q.points : 1;
+      totalPoints += points;
+
+      let selectedOptionIndex = null;
+      let textAnswer = "";
+      let pointsAwarded = 0;
+      let similarity = null;
+
+      // ── MCQ ──────────────────────────────────────────
+      if (q.type === "mcq") {
+        selectedOptionIndex =
+          typeof raw === "number"
+            ? raw
+            : typeof raw?.selectedOptionIndex === "number"
+              ? raw.selectedOptionIndex
+              : null;
+
+        if (
+          selectedOptionIndex !== null &&
+          selectedOptionIndex === q.correctOptionIndex
+        ) {
+          pointsAwarded = points;
+        }
+      }
+      // ── Short / Long (written) ───────────────────────
+      else {
+        textAnswer =
+          typeof raw === "string"
+            ? raw.trim()
+            : typeof raw?.textAnswer === "string"
+              ? raw.textAnswer.trim()
+              : "";
+
+        const expected = (q.expectedAnswer || "").trim();
+        if (expected && textAnswer) {
+          // simple case-insensitive exact match
+          // (you can later swap this for a real similarity score)
+          const match = textAnswer.toLowerCase() === expected.toLowerCase();
+          if (match) {
+            pointsAwarded = points;
+            similarity = 1;
+          } else {
+            similarity = 0;
+          }
+        }
+        // if admin left expectedAnswer empty → leave pointsAwarded = 0
+        // (instructor can grade manually later)
+      }
+
+      earnedPoints += pointsAwarded;
+
+      return {
+        questionIndex: idx,
+        selectedOptionIndex,
+        textAnswer,
+        pointsAwarded,
+        similarity,
+      };
+    });
+
+    const finalScore =
+      totalPoints > 0
+        ? Math.round((earnedPoints / totalPoints) * 100)
+        : typeof scorePercentage === "number"
+          ? scorePercentage
+          : 0;
+
+    const attemptPayload = {
+      studentId: req.userId,
+      answers: structuredAnswers,
+      scorePercentage: finalScore,
+      totalPoints,
+      earnedPoints,
+      status: "completed",
+      completedAt: new Date(),
+    };
 
     const existingIndex = assessment.attempts.findIndex(
       (att) => att.studentId.toString() === req.userId,
     );
 
     if (existingIndex > -1) {
-      assessment.attempts[existingIndex].answers = answers || [];
-      assessment.attempts[existingIndex].scorePercentage = finalScore;
-      assessment.attempts[existingIndex].status = "completed";
+      assessment.attempts[existingIndex] = {
+        ...(assessment.attempts[existingIndex].toObject?.() ??
+          assessment.attempts[existingIndex]),
+        ...attemptPayload,
+      };
     } else {
-      assessment.attempts.push({
-        studentId: req.userId,
-        answers: answers || [],
-        scorePercentage: finalScore,
-        status: "completed",
-      });
+      assessment.attempts.push(attemptPayload);
     }
 
     await assessment.save();
+
     res.status(200).json({
       message: "Assessment submitted successfully.",
       scorePercentage: finalScore,
+      earnedPoints,
+      totalPoints,
     });
   } catch (err) {
     console.error(err);
@@ -288,14 +491,14 @@ export const submitAssessment = async (req, res) => {
 
 export const getStudentAttendance = async (req, res) => {
   try {
-    const user = await User.findById(req.userId);
-    if (!user?.cohortId) {
-      return res.status(404).json({ message: "No cohort assigned." });
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
     }
 
     const records = await Attendance.find({
       studentId: req.userId,
-      cohortId: user.cohortId,
+      cohortId: ctx.cohortId,
     });
 
     const total = records.length;
@@ -303,7 +506,6 @@ export const getStudentAttendance = async (req, res) => {
       (r) => r.status === "present" || r.status === "late",
     ).length;
     const missed = records.filter((r) => r.status === "absent").length;
-
     const percentage = total > 0 ? Math.round((present / total) * 100) : null;
 
     res.status(200).json({
@@ -330,14 +532,14 @@ export const getStudentBadges = async (req, res) => {
     const earned = await StudentBadge.find({ studentId: req.userId });
     const earnedKeys = earned.map((e) => e.badgeKey);
 
-    const user = await User.findById(req.userId);
+    const ctx = await getStudentContext(req.userId);
     let activityScore = 0;
     let parts = 0;
 
-    if (user?.cohortId) {
+    if (ctx.cohortId) {
       const records = await Attendance.find({
         studentId: req.userId,
-        cohortId: user.cohortId,
+        cohortId: ctx.cohortId,
       });
       if (records.length > 0) {
         const present = records.filter(
@@ -346,23 +548,32 @@ export const getStudentBadges = async (req, res) => {
         activityScore += Math.round((present / records.length) * 100);
         parts += 1;
       }
+    }
 
-      const solos = await Solo.find({ cohortId: user.cohortId });
+    if (ctx.courseId) {
+      const solos = await Solo.find({ courseId: ctx.courseId });
       const graded = solos
         .map((s) =>
-          s.submissions.find((sub) => sub.studentId.toString() === req.userId),
+          s.submissions?.find((sub) => sub.studentId.toString() === req.userId),
         )
         .filter(
-          (sub) => sub?.status === "graded" && typeof sub.score === "number",
+          (sub) =>
+            sub?.status === "graded" &&
+            (typeof sub.score === "number" ||
+              typeof sub.scorePercentage === "number" ||
+              typeof sub.totalScore === "number"),
         );
       if (graded.length > 0) {
         activityScore += Math.round(
-          graded.reduce((a, s) => a + s.score, 0) / graded.length,
+          graded.reduce(
+            (a, s) => a + (s.scorePercentage ?? s.score ?? s.totalScore ?? 0),
+            0,
+          ) / graded.length,
         );
         parts += 1;
       }
 
-      const assessments = await Assessment.find({ cohortId: user.cohortId });
+      const assessments = await Assessment.find({ courseId: ctx.courseId });
       const scores = [];
       for (const a of assessments) {
         const att = a.attempts?.find(
@@ -403,6 +614,7 @@ export const getStudentBadges = async (req, res) => {
     res.status(500).json({ message: "Error fetching badges." });
   }
 };
+
 export const getStudentChallenges = async (req, res) => {
   try {
     const user = await User.findById(req.userId);
@@ -437,14 +649,16 @@ export const getStudentChallenges = async (req, res) => {
 
 export const getStudentDashboard = async (req, res) => {
   try {
-    const user = await User.findById(req.userId).populate("cohortId");
-    if (!user) return res.status(404).json({ message: "User not found." });
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error && !ctx.user) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
+    }
 
-    const cohortId = user.cohortId?._id || user.cohortId;
+    const { user, cohort, course, courseId } = ctx;
 
     let courseProgress = 0;
-    if (cohortId) {
-      const milestones = await Milestone.find({ cohortId }).sort({ order: 1 });
+    if (courseId) {
+      const milestones = await Milestone.find({ courseId }).sort({ order: 1 });
       const unlocked = milestones.filter((m) => m.isUnlocked).length;
       courseProgress =
         milestones.length > 0
@@ -455,13 +669,13 @@ export const getStudentDashboard = async (req, res) => {
     res.status(200).json({
       student: {
         id: user._id,
-        name: user.name || user.fullName || "Student",
+        name: user.fullName || user.name || "Student",
         avatar: user.avatar || "/temp-student-asset/joan.jpg",
-        cohortName: user.cohortId?.name || "—",
+        cohortName: cohort?.name || "—",
       },
       course: {
-        category: user.cohortId?.courseCategory || "Software development",
-        title: user.cohortId?.courseTitle || "MERN",
+        category: course?.category || "—",
+        title: course?.title || "—",
         progressPercentage: courseProgress,
       },
     });
@@ -470,7 +684,6 @@ export const getStudentDashboard = async (req, res) => {
     res.status(500).json({ message: "Error loading dashboard." });
   }
 };
-
 export const getStudentNotifications = async (req, res) => {
   try {
     const user = await User.findById(req.userId);
@@ -494,30 +707,94 @@ export const getStudentNotifications = async (req, res) => {
 
 export const getStudentSchedule = async (req, res) => {
   try {
-    const user = await User.findById(req.userId).populate("cohortId");
-    if (!user?.cohortId) {
-      return res.status(404).json({ message: "No cohort assigned." });
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
     }
 
-    const events = await ScheduleEvent.find({
-      cohortId: user.cohortId._id || user.cohortId,
-    }).sort({ date: 1 });
+    // 1) Prefer concrete ClassSession rows (from admin "generate sessions")
+    let sessions = await ClassSession.find({ cohortId: ctx.cohortId })
+      .sort({ date: 1 })
+      .lean();
+
+    // 2) Fallback: expand recurring scheduleSlots if nothing was generated yet
+    if (!sessions.length && ctx.cohort?.scheduleSlots?.length) {
+      try {
+        const { expandScheduleSlots } =
+          await import("../utils/scheduleHelpers.js");
+        const expanded = expandScheduleSlots({
+          startDate: ctx.cohort.startDate,
+          endDate: ctx.cohort.endDate,
+          scheduleSlots: ctx.cohort.scheduleSlots,
+        });
+
+        sessions = expanded.map((s, i) => ({
+          _id: `slot-${i}-${toDateKey(s.date) || i}`,
+          title: s.title || "Class",
+          courseName: ctx.course?.title,
+          date: s.date,
+          startTime: s.startTime,
+          endTime: s.endTime,
+          location: s.location,
+        }));
+      } catch (expandErr) {
+        console.error("expandScheduleSlots failed:", expandErr);
+        // continue with empty sessions rather than 500
+      }
+    }
+
+    // 3) Optional: also merge any legacy ScheduleEvent docs
+    try {
+      const legacyEvents = await ScheduleEvent.find({
+        cohortId: ctx.cohortId,
+      })
+        .sort({ date: 1 })
+        .lean();
+
+      for (const ev of legacyEvents) {
+        sessions.push({
+          _id: ev._id,
+          title: ev.title,
+          courseName: ctx.course?.title,
+          date: ev.date,
+          startTime: ev.startTime || (ev.time || "").split("-")[0]?.trim(),
+          endTime: ev.endTime || (ev.time || "").split("-")[1]?.trim(),
+          location: ev.location,
+          type: ev.type || "event",
+        });
+      }
+    } catch {
+      // ScheduleEvent model may be empty / unused — ignore
+    }
 
     const schedule = {};
-    for (const ev of events) {
-      const key = ev.date;
+    for (const s of sessions) {
+      const key = toDateKey(s.date);
+      if (!key) continue;
+
       if (!schedule[key]) schedule[key] = [];
+
+      const start = s.startTime || "";
+      const end = s.endTime || "";
+      const time =
+        start && end ? `${start} - ${end}` : start || end || s.time || "";
+
       schedule[key].push({
-        id: ev._id,
-        title: ev.title,
-        type: ev.type,
-        time: ev.time || `${ev.startTime || ""} - ${ev.endTime || ""}`.trim(),
-        location: ev.location,
-        theme: ev.theme || undefined,
+        id: String(s._id),
+        title: s.title || s.courseName || "Class",
+        type: s.type === "demo" || s.type === "event" ? s.type : "class",
+        time,
+        location: s.location,
+        theme: CLASS_THEME,
       });
     }
 
-    const end = user.cohortId.endDate ? new Date(user.cohortId.endDate) : null;
+    // Sort events within each day by time string
+    for (const key of Object.keys(schedule)) {
+      schedule[key].sort((a, b) => (a.time || "").localeCompare(b.time || ""));
+    }
+
+    const end = ctx.cohort?.endDate ? new Date(ctx.cohort.endDate) : null;
     const daysLeft = end
       ? Math.max(
           0,
@@ -528,12 +805,392 @@ export const getStudentSchedule = async (req, res) => {
     res.status(200).json({
       schedule,
       daysLeftToCompletion: daysLeft,
-      courseStartDate: user.cohortId.startDate,
-      courseEndDate: user.cohortId.endDate,
-      cohortName: user.cohortId.name,
+      courseStartDate: ctx.cohort?.startDate,
+      courseEndDate: ctx.cohort?.endDate,
+      cohortName: ctx.cohort?.name,
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Error fetching schedule." });
+  }
+};
+
+export const getStudentMilestones = async (req, res) => {
+  try {
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
+    }
+    if (!ctx.courseId) {
+      return res
+        .status(404)
+        .json({ message: "Cohort has no course assigned." });
+    }
+
+    const milestones = await Milestone.find({ courseId: ctx.courseId }).sort({
+      order: 1,
+    });
+
+    const milestoneIds = milestones.map((m) => m._id);
+
+    const segmentCounts = await Segment.aggregate([
+      { $match: { milestoneId: { $in: milestoneIds } } },
+      { $group: { _id: "$milestoneId", count: { $sum: 1 } } },
+    ]);
+
+    const countMap = Object.fromEntries(
+      segmentCounts.map((s) => [s._id.toString(), s.count]),
+    );
+
+    const result = milestones.map((m) => {
+      const obj = m.toObject();
+      const segmentsCount = countMap[m._id.toString()] || 0;
+      return {
+        ...obj,
+        id: m._id,
+        segmentsCount,
+        // so existing frontend `m.segments?.length` still works:
+        segments: Array.from({ length: segmentsCount }),
+      };
+    });
+
+    res.status(200).json({
+      milestones: result,
+      courseStartDate: ctx.cohort?.startDate,
+      courseEndDate: ctx.cohort?.endDate,
+      cohortName: ctx.cohort?.name,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error fetching milestones." });
+  }
+};
+
+export const getStudentMilestoneById = async (req, res) => {
+  try {
+    const { milestoneId } = req.params;
+
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
+    }
+    if (!ctx.courseId) {
+      return res
+        .status(404)
+        .json({ message: "Cohort has no course assigned." });
+    }
+
+    const milestone = await Milestone.findById(milestoneId).populate(
+      "soloId",
+      "title dueDate isLocked",
+    );
+    if (!milestone) {
+      return res.status(404).json({ message: "Milestone not found." });
+    }
+    if (milestone.courseId?.toString() !== ctx.courseId.toString()) {
+      return res.status(403).json({ message: "Not allowed." });
+    }
+
+    const segments = await Segment.find({ milestoneId: milestone._id }).sort({
+      order: 1,
+    });
+
+    const all = await Milestone.find({ courseId: ctx.courseId })
+      .sort({ order: 1 })
+      .select("title order isUnlocked");
+
+    const idx = all.findIndex(
+      (m) => m._id.toString() === milestone._id.toString(),
+    );
+    const next = idx >= 0 && idx < all.length - 1 ? all[idx + 1] : null;
+
+    const allSegmentsComplete =
+      segments.length > 0 && segments.every((s) => s.isCompleted);
+
+    let soloPayload = null;
+    if (milestone.soloId) {
+      const soloDoc =
+        typeof milestone.soloId === "object" && milestone.soloId._id
+          ? milestone.soloId
+          : await Solo.findById(milestone.soloId).select(
+              "title dueDate isLocked",
+            );
+
+      if (soloDoc) {
+        soloPayload = {
+          id: soloDoc._id || soloDoc.id || milestone.soloId,
+          title: soloDoc.title,
+          dueDate: soloDoc.dueDate,
+          isLocked: !allSegmentsComplete, // locked until all segments done
+        };
+      }
+    }
+
+    const completedCount = segments.filter((s) => s.isCompleted).length;
+    const clearanceText =
+      segments.length === 0
+        ? "No segments yet for this milestone"
+        : completedCount >= segments.length
+          ? "All segments complete — solos unlocked"
+          : `Complete ${segments.length - completedCount} more segment${
+              segments.length - completedCount === 1 ? "" : "s"
+            } to unlock solos`;
+
+    res.status(200).json({
+      _id: milestone._id,
+      id: milestone._id,
+      title: milestone.title,
+      description: milestone.description,
+      order: milestone.order,
+      isUnlocked: Boolean(milestone.isUnlocked),
+      clearanceText,
+      nextMilestoneTitle: next?.title || null,
+      nextMilestone: next
+        ? { id: next._id, title: next.title, isUnlocked: next.isUnlocked }
+        : null,
+      segments: segments.map((s) => ({
+        _id: s._id,
+        id: s._id,
+        title: s.title,
+        order: s.order,
+        isCompleted: Boolean(s.isCompleted),
+        pagesCount: Array.isArray(s.pages) ? s.pages.length : 0,
+      })),
+      solo: milestone.soloId
+        ? {
+            id: milestone.soloId._id || milestone.soloId,
+            title: milestone.soloId.title,
+            dueDate: milestone.soloId.dueDate,
+            isLocked: milestone.soloId.isLocked,
+          }
+        : null,
+      milestone,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error fetching milestone." });
+  }
+};
+
+export const getStudentSegmentById = async (req, res) => {
+  try {
+    const { milestoneId, segmentId } = req.params;
+
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
+    }
+    if (!ctx.courseId) {
+      return res
+        .status(404)
+        .json({ message: "Cohort has no course assigned." });
+    }
+
+    const milestone = await Milestone.findById(milestoneId);
+    if (!milestone) {
+      return res.status(404).json({ message: "Milestone not found." });
+    }
+    if (milestone.courseId?.toString() !== ctx.courseId.toString()) {
+      return res.status(403).json({ message: "Not allowed." });
+    }
+
+    const segment = await Segment.findOne({
+      _id: segmentId,
+      milestoneId: milestone._id,
+    }).lean();
+
+    if (!segment) {
+      return res.status(404).json({ message: "Segment not found." });
+    }
+
+    const pages = Array.isArray(segment.pages) ? segment.pages : [];
+
+    const firstPage = pages[0];
+    const introFromBlocks =
+      firstPage?.blocks
+        ?.filter((b) => b?.type === "text" || b?.type === "TEXT")
+        ?.map((b) => b.content || b.text || "")
+        ?.filter(Boolean)
+        ?.join("\n\n") ||
+      firstPage?.content ||
+      firstPage?.introduction ||
+      segment.introduction ||
+      "";
+
+    const siblings = await Segment.find({ milestoneId: milestone._id })
+      .sort({ order: 1 })
+      .select("_id title order isCompleted")
+      .lean();
+
+    const idx = siblings.findIndex(
+      (s) => s._id.toString() === segment._id.toString(),
+    );
+
+    res.status(200).json({
+      _id: segment._id,
+      id: segment._id,
+      title: segment.title,
+      order: segment.order,
+      isCompleted: Boolean(segment.isCompleted),
+      introduction: introFromBlocks || null,
+      pages,
+
+      segment: {
+        _id: segment._id,
+        id: segment._id,
+        title: segment.title,
+        order: segment.order,
+        isCompleted: Boolean(segment.isCompleted),
+        introduction: introFromBlocks || null,
+        pages,
+      },
+      milestone: {
+        _id: milestone._id,
+        id: milestone._id,
+        title: milestone.title,
+        isUnlocked: Boolean(milestone.isUnlocked),
+      },
+      prevSegment:
+        idx > 0
+          ? { id: siblings[idx - 1]._id, title: siblings[idx - 1].title }
+          : null,
+      nextSegment:
+        idx >= 0 && idx < siblings.length - 1
+          ? { id: siblings[idx + 1]._id, title: siblings[idx + 1].title }
+          : null,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error fetching segment." });
+  }
+};
+
+export const completeStudentSegment = async (req, res) => {
+  try {
+    const { milestoneId, segmentId } = req.params;
+
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
+    }
+    if (!ctx.courseId) {
+      return res
+        .status(404)
+        .json({ message: "Cohort has no course assigned." });
+    }
+
+    const milestone = await Milestone.findById(milestoneId);
+    if (!milestone) {
+      return res.status(404).json({ message: "Milestone not found." });
+    }
+    if (milestone.courseId?.toString() !== ctx.courseId.toString()) {
+      return res.status(403).json({ message: "Not allowed." });
+    }
+
+    // Load segment and force-complete it
+    const segment = await Segment.findOne({
+      _id: segmentId,
+      milestoneId: milestone._id,
+    });
+    if (!segment) {
+      return res.status(404).json({ message: "Segment not found." });
+    }
+
+    segment.isCompleted = true;
+    segment.markModified("isCompleted"); // ensure Mongoose persists the change
+    await segment.save();
+
+    // Re-fetch ALL segments for this milestone (fresh from DB)
+    const allSegments = await Segment.find({ milestoneId: milestone._id });
+    const allDone =
+      allSegments.length > 0 &&
+      allSegments.every((s) => Boolean(s.isCompleted));
+
+    let soloUnlocked = false;
+    const soloId = milestone.soloId
+      ? (milestone.soloId._id || milestone.soloId).toString()
+      : null;
+
+    if (allDone && soloId) {
+      await Solo.findByIdAndUpdate(soloId, { isLocked: false });
+      soloUnlocked = true;
+    }
+
+    // Debug-friendly response so you can verify in Network tab
+    res.status(200).json({
+      message: allDone
+        ? "Segment complete. All segments done — solo unlocked."
+        : "Segment marked complete.",
+      segmentId: segment._id,
+      segmentIsCompleted: segment.isCompleted,
+      allSegmentsComplete: allDone,
+      segmentsSnapshot: allSegments.map((s) => ({
+        id: s._id,
+        title: s.title,
+        isCompleted: s.isCompleted,
+      })),
+      soloUnlocked,
+      soloId,
+    });
+  } catch (err) {
+    console.error("completeStudentSegment error:", err);
+    res.status(500).json({ message: "Failed to complete segment." });
+  }
+};
+export const getStudentSoloById = async (req, res) => {
+  try {
+    const { soloId } = req.params;
+
+    const ctx = await getStudentContext(req.userId);
+    if (ctx.error) {
+      return res.status(ctx.error.status).json({ message: ctx.error.message });
+    }
+    if (!ctx.courseId) {
+      return res
+        .status(404)
+        .json({ message: "Cohort has no course assigned." });
+    }
+
+    const solo = await Solo.findById(soloId).lean();
+    if (!solo) {
+      return res.status(404).json({ message: "Solo not found." });
+    }
+    if (solo.courseId?.toString() !== ctx.courseId.toString()) {
+      return res.status(403).json({ message: "Not allowed." });
+    }
+
+    // Derive lock from segments if linked to a milestone
+    let isLocked = Boolean(solo.isLocked);
+    if (solo.milestoneId) {
+      const segments = await Segment.find({ milestoneId: solo.milestoneId });
+      if (segments.length > 0) {
+        isLocked = !segments.every((s) => Boolean(s.isCompleted));
+      }
+    }
+
+    const submission =
+      (solo.submissions || []).find(
+        (s) => s.studentId?.toString() === req.userId,
+      ) || null;
+
+    res.status(200).json({
+      _id: solo._id,
+      id: solo._id,
+      title: solo.title,
+      description: solo.description || "",
+      overview: solo.overview || "",
+      goal: solo.goal || "",
+      timeToComplete: solo.timeToComplete || "",
+      dueDate: solo.dueDate || null,
+      order: solo.order ?? 0,
+      techStack: solo.techStack || [],
+      architecture: solo.architecture || [],
+      milestoneId: solo.milestoneId || null,
+      isLocked,
+      mySubmission: submission,
+    });
+  } catch (err) {
+    console.error("getStudentSoloById", err);
+    res.status(500).json({ message: "Error fetching solo." });
   }
 };
