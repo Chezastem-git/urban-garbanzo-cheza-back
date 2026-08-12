@@ -793,12 +793,11 @@ export const createSolo = async (req, res) => {
   try {
     const {
       courseId,
-      milestoneId,
+      milestoneId, // required now
       title,
       description,
       dueDate,
       order,
-      isLocked,
       timeToComplete,
       overview,
       goal,
@@ -811,15 +810,31 @@ export const createSolo = async (req, res) => {
         .status(400)
         .json({ message: "courseId and title are required." });
     }
+    if (!milestoneId) {
+      return res.status(400).json({
+        message: "milestoneId is required. Solos must belong to a milestone.",
+      });
+    }
 
+    const milestone = await Milestone.findById(milestoneId);
+    if (!milestone) {
+      return res.status(404).json({ message: "Milestone not found." });
+    }
+    if (milestone.courseId?.toString() !== courseId.toString()) {
+      return res
+        .status(400)
+        .json({ message: "Milestone does not belong to this course." });
+    }
+
+    // New solos start locked until segments are finished
     const solo = await Solo.create({
       courseId,
-      milestoneId: milestoneId || null,
+      milestoneId,
       title,
       description,
       dueDate: dueDate ? new Date(dueDate) : undefined,
       order: order ?? 0,
-      isLocked: Boolean(isLocked),
+      isLocked: true,
       timeToComplete,
       overview,
       goal,
@@ -828,11 +843,11 @@ export const createSolo = async (req, res) => {
       submissions: [],
     });
 
-    if (milestoneId) {
-      await Milestone.findByIdAndUpdate(milestoneId, { soloId: solo._id });
-    }
+    await Milestone.findByIdAndUpdate(milestoneId, { soloId: solo._id });
 
-    res.status(201).json({ message: "Solo created.", solo });
+    res
+      .status(201)
+      .json({ message: "Solo created and linked to milestone.", solo });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to create solo." });
