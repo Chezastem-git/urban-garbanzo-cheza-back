@@ -7,9 +7,7 @@ const sectionSchema = new mongoose.Schema(
       enum: ["text", "image", "video"],
       required: true,
     },
-    // text → HTML or markdown body
     content: { type: String, default: "" },
-    // image / video → URL
     url: { type: String, default: "" },
     caption: { type: String, default: "" },
   },
@@ -42,6 +40,12 @@ const segmentSchema = new mongoose.Schema(
     title: { type: String, required: true, trim: true },
     order: { type: Number, default: 0 },
     pages: { type: [pageSchema], default: [] },
+
+    // ── student progress ──
+    isCompleted: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true },
 );
