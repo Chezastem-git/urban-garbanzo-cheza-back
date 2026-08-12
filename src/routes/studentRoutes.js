@@ -16,15 +16,30 @@ import {
   getStudentAttendance,
   getStudentBadges,
   getStudentDashboard,
+  getStudentMilestoneById,
+  getStudentSegmentById,
+  completeStudentSegment,
+  getStudentSoloById,
 } from "../controllers/studentController.js";
 
 const router = Router();
 router.use(requireUserAuth);
 
 router.get("/milestones", getStudentMilestones);
+router.get("/milestones/:milestoneId", getStudentMilestoneById);
+router.get(
+  "/milestones/:milestoneId/segments/:segmentId",
+  getStudentSegmentById,
+);
+router.post(
+  "/milestones/:milestoneId/segments/:segmentId/complete",
+  requireUserAuth,
+  completeStudentSegment,
+);
 
 router.get("/solos", getStudentSolos);
 router.post("/solos/:soloId/submit", submitSolo);
+router.get("/solos/:soloId", getStudentSoloById);
 
 router.get("/recorded-sessions", getRecordedSessions);
 router.get("/alerts/pending", getPendingAlerts);
