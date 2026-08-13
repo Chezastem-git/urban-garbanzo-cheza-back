@@ -833,23 +833,40 @@ export const getStudentMilestones = async (req, res) => {
 
     const milestoneIds = milestones.map((m) => m._id);
 
-    const segmentCounts = await Segment.aggregate([
-      { $match: { milestoneId: { $in: milestoneIds } } },
-      { $group: { _id: "$milestoneId", count: { $sum: 1 } } },
-    ]);
+    const segments = await Segment.find({
+      milestoneId: { $in: milestoneIds },
+    }).select("milestoneId isCompleted");
 
-    const countMap = Object.fromEntries(
-      segmentCounts.map((s) => [s._id.toString(), s.count]),
-    );
+    const segmentsByMilestone = {};
+    for (const s of segments) {
+      const key = s.milestoneId.toString();
+      if (!segmentsByMilestone[key]) segmentsByMilestone[key] = [];
+      segmentsByMilestone[key].push(s);
+    }
+
+    let previousFullyDone = true;
 
     const result = milestones.map((m) => {
       const obj = m.toObject();
-      const segmentsCount = countMap[m._id.toString()] || 0;
+      const segs = segmentsByMilestone[m._id.toString()] || [];
+      const segmentsCount = segs.length;
+
+      const allSegmentsComplete =
+        segmentsCount > 0 && segs.every((s) => Boolean(s.isCompleted));
+
+      const isUnlocked =
+        Boolean(m.isUnlocked) || allSegmentsComplete || previousFullyDone;
+
+      // Prepare for the next milestone
+      previousFullyDone = allSegmentsComplete;
+
       return {
         ...obj,
         id: m._id,
+        isUnlocked, // stays true after completion
+        isCompleted: allSegmentsComplete,
         segmentsCount,
-        // so existing frontend `m.segments?.length` still works:
+        // keep frontend compatibility (m.segments?.length)
         segments: Array.from({ length: segmentsCount }),
       };
     });
@@ -905,8 +922,30 @@ export const getStudentMilestoneById = async (req, res) => {
     const next = idx >= 0 && idx < all.length - 1 ? all[idx + 1] : null;
 
     const allSegmentsComplete =
-      segments.length > 0 && segments.every((s) => s.isCompleted);
+      segments.length > 0 && segments.every((s) => Boolean(s.isCompleted));
 
+    // ── Unlock logic: once reached or completed → stay unlocked forever ──
+    let isUnlocked = Boolean(milestone.isUnlocked) || allSegmentsComplete;
+
+    if (!isUnlocked) {
+      const currentOrder = milestone.order ?? 0;
+      const previous = all.filter((m) => (m.order ?? 0) < currentOrder);
+
+      if (previous.length === 0) {
+        // First milestone is always open
+        isUnlocked = true;
+      } else {
+        // Unlock if the immediate previous milestone is fully completed
+        const prev = previous[previous.length - 1];
+        const prevSegments = await Segment.find({ milestoneId: prev._id });
+        const prevDone =
+          prevSegments.length > 0 &&
+          prevSegments.every((s) => Boolean(s.isCompleted));
+        if (prevDone) isUnlocked = true;
+      }
+    }
+
+    // Solo payload
     let soloPayload = null;
     if (milestone.soloId) {
       const soloDoc =
@@ -942,7 +981,8 @@ export const getStudentMilestoneById = async (req, res) => {
       title: milestone.title,
       description: milestone.description,
       order: milestone.order,
-      isUnlocked: Boolean(milestone.isUnlocked),
+      isUnlocked, // ← stays true after completion
+      isCompleted: allSegmentsComplete,
       clearanceText,
       nextMilestoneTitle: next?.title || null,
       nextMilestone: next
@@ -956,14 +996,7 @@ export const getStudentMilestoneById = async (req, res) => {
         isCompleted: Boolean(s.isCompleted),
         pagesCount: Array.isArray(s.pages) ? s.pages.length : 0,
       })),
-      solo: milestone.soloId
-        ? {
-            id: milestone.soloId._id || milestone.soloId,
-            title: milestone.soloId.title,
-            dueDate: milestone.soloId.dueDate,
-            isLocked: milestone.soloId.isLocked,
-          }
-        : null,
+      solo: soloPayload,
       milestone,
     });
   } catch (err) {
