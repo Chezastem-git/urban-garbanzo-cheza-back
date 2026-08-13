@@ -1,3 +1,5 @@
+// src/controllers/InstructorCourseController.js
+
 /**
  * GET /api/instructor/courses
  * Courses linked to the instructor’s cohorts.

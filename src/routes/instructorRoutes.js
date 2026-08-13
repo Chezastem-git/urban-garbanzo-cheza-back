@@ -3,9 +3,6 @@
 import { Router } from "express";
 import { requireUserAuth } from "../middleware/userAuth.js";
 import {
-  // getInstructorSolos,
-  // gradeSolo,
-  // createMilestone,
   getInstructorAssessments,
   getInstructorAssessmentById,
   getInstructorCohorts,
@@ -19,31 +16,37 @@ import {
   getInstructorCourseById,
   getInstructorSolos,
   getInstructorSoloById,
+  getStudentNotificationsForInstructor,
+  getInstructorSchedule
 } from "../controllers/instructorController.js";
-import { getInstructorSessions,markSessionAttendance } from "../controllers/classSessionController.js";
+import {
+  getInstructorSessions,
+  markSessionAttendance,
+} from "../controllers/classSessionController.js";
 
 const router = Router();
 router.use(requireUserAuth);
 
-// router.get("/solos", getInstructorSolos);
-// router.post("/solos/:soloId/submissions/:submissionId/grade", gradeSolo);
-// router.post("/milestones", createMilestone);
-
-router.get("/solos", getInstructorSolos);
-router.get("/solos/:soloId", getInstructorSoloById);
-
 router.get("/dashboard", getInstructorDashboard);
+router.get("/schedule",  getInstructorSchedule);
 
-router.get("/solos/submissions", getInstructorSoloSubmissions);
+// ── Solos: static paths BEFORE :soloId ───────────────────────────────
+router.get("/solos", getInstructorSolos);
+router.get("/solos/submissions", getInstructorSoloSubmissions); // ← must be above :soloId
 router.post(
   "/solos/:soloId/submissions/:submissionId/grade",
   gradeSoloSubmission,
 );
 
+router.get(
+  "/students/:studentId/notifications",
+  getStudentNotificationsForInstructor,
+);
+router.get("/solos/:soloId", getInstructorSoloById); // ← param route last
+
 router.get("/courses", getInstructorCourses);
 router.get("/courses/:courseId", getInstructorCourseById);
 
-// instructorRoutes.js
 router.get("/sessions", getInstructorSessions);
 router.post("/sessions/:sessionId/attendance", markSessionAttendance);
 

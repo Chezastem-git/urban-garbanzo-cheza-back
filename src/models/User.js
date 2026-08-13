@@ -26,23 +26,21 @@ const UserSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: [
-        "enrolled", // newly added student
-        "active", // currently participating
-        "inactive", // temporarily paused / not attending
-        "employed", // for instructors
-        "suspended", // blocked by admin
-        "graduated", // completed the program
+        "enrolled",
+        "active",
+        "inactive",
+        "employed",
+        "suspended",
+        "graduated",
       ],
       required: true,
       default: "enrolled",
     },
-    // Main cohort (students usually have one)
     cohortId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Cohort",
       default: null,
     },
-    // Optional: support instructors belonging to multiple cohorts
     cohortIds: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -60,6 +58,27 @@ const UserSchema = new mongoose.Schema(
     },
     graduatedAt: {
       type: Date,
+      default: null,
+    },
+
+    // ── Soft delete / audit ─────────────────────────────────
+    deletedAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    deletedByAdminId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Admin",
+      default: null,
+    },
+    // Snapshot of identity at deletion (email is rewritten so unique holds)
+    deletedEmail: {
+      type: String,
+      default: null,
+    },
+    deletedFullName: {
+      type: String,
       default: null,
     },
   },

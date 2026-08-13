@@ -42,11 +42,20 @@ import {
   getSoloById,
   updateSolo,
   updateAssessment,
+  repairCohortInstructorLinks,
+  deleteUser,
+  getDeletedUsers
 } from "../controllers/adminController.js";
 import { requireAdmin } from "../middleware/adminAuth.js";
 import { Router } from "express";
 
 const router = Router();
+
+router.post(
+  "/repair/cohort-instructors",
+  /* requireAdmin, */
+  repairCohortInstructorLinks,
+);
 
 router.get("/milestones/:milestoneId", getMilestoneById);
 router.post("/segments", createSegment);
@@ -88,6 +97,10 @@ router.get("/class-sessions/:sessionId", getClassSessionById);
 // Users
 router.post("/users/provision", provisionUser);
 router.get("/users", getAllUsers);
+
+router.get("/users/deleted", getDeletedUsers);
+router.delete("/users/:userId", deleteUser);
+
 router.get("/users/:userId", getUserById);
 router.patch("/users/:userId/status", updateUserStatus);
 router.patch("/users/:userId/cohort", assignUserToCohort);
@@ -112,6 +125,5 @@ router.put("/graduation-settings", updateGraduationSettings);
 router.get("/students/:studentId/eligibility", evaluateGraduationEligibility);
 router.post("/students/:studentId/graduate", graduateStudent);
 
-//
 
 export default router;

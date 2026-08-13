@@ -13,11 +13,58 @@ import Notification from "../models/Notification.js";
 import Certificate from "../models/Certificate.js";
 import GraduationSettings from "../models/GraduationSettings.js";
 import Segment from "../models/Segment.js";
+import StudentProgress from "../models/StudentProgress.js";
 
 // import Cohort from "../models/Cohort.js";
 // import Course from "../models/Course.js";
 import ClassSession from "../models/ClassSession.js";
 import { expandScheduleSlots } from "../utils/scheduleHelpers.js";
+
+async function setCohortInstructor(cohortId, instructorId) {
+  const cohort = await Cohort.findById(cohortId);
+  if (!cohort) {
+    const err = new Error("COHORT_NOT_FOUND");
+    err.status = 404;
+    throw err;
+  }
+
+  // Strip this cohort from every instructor
+  await User.updateMany(
+    { role: "instructor", cohortIds: cohortId },
+    { $pull: { cohortIds: cohortId } },
+  );
+  await User.updateMany(
+    { role: "instructor", cohortId: cohortId },
+    { $unset: { cohortId: "" } },
+  );
+
+  if (!instructorId) {
+    cohort.instructorId = null;
+    await cohort.save();
+    return cohort;
+  }
+
+  const instructor = await User.findOne({
+    _id: instructorId,
+    role: "instructor",
+  });
+  if (!instructor) {
+    const err = new Error("INSTRUCTOR_NOT_FOUND");
+    err.status = 404;
+    throw err;
+  }
+
+  cohort.instructorId = instructor._id;
+  await cohort.save();
+
+  if (!Array.isArray(instructor.cohortIds)) instructor.cohortIds = [];
+  if (!instructor.cohortIds.some((id) => String(id) === String(cohortId))) {
+    instructor.cohortIds.push(cohort._id);
+  }
+  await instructor.save();
+
+  return cohort;
+}
 
 // ─────────────────────────────────────────────
 // AUTH
@@ -329,6 +376,7 @@ export const createCohort = async (req, res) => {
       return res.status(400).json({ message: "Cohort code already exists." });
     }
 
+    // Create WITHOUT instructor first, then assign via helper
     const cohort = await Cohort.create({
       name,
       code: code.toLowerCase(),
@@ -336,34 +384,29 @@ export const createCohort = async (req, res) => {
       startDate: new Date(startDate),
       endDate: endDate ? new Date(endDate) : undefined,
       courseId,
-      instructorId: instructorId || null,
+      instructorId: null,
       createdByAdminId: req.adminId,
       scheduleSlots: Array.isArray(scheduleSlots) ? scheduleSlots : [],
       timezone: timezone || "Africa/Nairobi",
     });
 
-    // const cohort = await Cohort.create({
-    //   name,
-    //   code: code.toLowerCase(),
-    //   description,
-    //   startDate: new Date(startDate),
-    //   endDate: endDate ? new Date(endDate) : undefined,
-    //   courseId,
-    //   instructorId: instructorId || null,
-    //   createdByAdminId: req.adminId,
-    // });
-
     if (instructorId) {
-      await User.findByIdAndUpdate(instructorId, { cohortId: cohort._id });
+      await setCohortInstructor(cohort._id, instructorId);
+      const refreshed = await Cohort.findById(cohort._id);
+      return res
+        .status(201)
+        .json({ message: "Cohort created successfully.", cohort: refreshed });
     }
 
     res.status(201).json({ message: "Cohort created successfully.", cohort });
   } catch (err) {
     console.error(err);
+    if (err.status === 404) {
+      return res.status(404).json({ message: err.message });
+    }
     res.status(500).json({ message: "Failed to create cohort." });
   }
 };
-
 export const getAllCohorts = async (req, res) => {
   try {
     const cohorts = await Cohort.find()
@@ -437,28 +480,33 @@ export const updateCohort = async (req, res) => {
     if (startDate) updates.startDate = new Date(startDate);
     if (endDate) updates.endDate = new Date(endDate);
     if (courseId) updates.courseId = courseId;
-    if (instructorId !== undefined) updates.instructorId = instructorId || null;
     if (isActive !== undefined) updates.isActive = isActive;
+    // Do NOT put instructorId in updates — handled by setCohortInstructor
 
-    const cohort = await Cohort.findByIdAndUpdate(
-      req.params.cohortId,
-      updates,
-      {
-        new: true,
-      },
-    )
-      .populate("courseId", "title slug")
-      .populate("instructorId", "fullName email");
+    let cohort = await Cohort.findByIdAndUpdate(req.params.cohortId, updates, {
+      new: true,
+    });
 
     if (!cohort) return res.status(404).json({ message: "Cohort not found." });
 
-    if (instructorId) {
-      await User.findByIdAndUpdate(instructorId, { cohortId: cohort._id });
+    // Reassign instructor (or clear) — enforces single owner
+    if (instructorId !== undefined) {
+      await setCohortInstructor(cohort._id, instructorId || null);
+      cohort = await Cohort.findById(cohort._id)
+        .populate("courseId", "title slug")
+        .populate("instructorId", "fullName email");
+    } else {
+      cohort = await Cohort.findById(cohort._id)
+        .populate("courseId", "title slug")
+        .populate("instructorId", "fullName email");
     }
 
     res.status(200).json({ message: "Cohort updated.", cohort });
   } catch (err) {
     console.error(err);
+    if (err.status === 404) {
+      return res.status(404).json({ message: err.message.replace(/_/g, " ") });
+    }
     res.status(500).json({ message: "Failed to update cohort." });
   }
 };
@@ -483,6 +531,55 @@ export const deleteCohort = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to delete cohort." });
+  }
+};
+
+// ─────────────────────────────────────────────
+// COHORT / INSTRUCTOR LINK REPAIR
+// ─────────────────────────────────────────────
+
+export const repairCohortInstructorLinks = async (req, res) => {
+  try {
+    const cohorts = await Cohort.find().select("_id instructorId");
+    let fixed = 0;
+
+    for (const c of cohorts) {
+      // Source of truth = Cohort.instructorId
+      await User.updateMany(
+        {
+          role: "instructor",
+          $or: [{ cohortIds: c._id }, { cohortId: c._id }],
+          ...(c.instructorId ? { _id: { $ne: c.instructorId } } : {}),
+        },
+        { $pull: { cohortIds: c._id } },
+      );
+
+      await User.updateMany(
+        {
+          role: "instructor",
+          cohortId: c._id,
+          ...(c.instructorId ? { _id: { $ne: c.instructorId } } : {}),
+        },
+        { $unset: { cohortId: "" } },
+      );
+
+      if (c.instructorId) {
+        await User.updateOne(
+          { _id: c.instructorId, role: "instructor" },
+          { $addToSet: { cohortIds: c._id } },
+        );
+      }
+
+      fixed += 1;
+    }
+
+    res.status(200).json({
+      message: `Repaired instructor links for ${fixed} cohort(s).`,
+      fixed,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Repair failed." });
   }
 };
 
@@ -553,7 +650,9 @@ export const provisionUser = async (req, res) => {
 export const getAllUsers = async (req, res) => {
   try {
     const { role, status, cohortId, search } = req.query;
-    const filter = {};
+    const filter = {
+      deletedAt: null, // ← exclude soft-deleted users
+    };
 
     if (role) filter.role = role;
     if (status) filter.status = status;
@@ -584,7 +683,8 @@ export const getUserById = async (req, res) => {
       .populate({
         path: "cohortId",
         populate: { path: "courseId", select: "title slug" },
-      });
+      })
+      .populate("cohortIds", "name code"); // ← instructors’ multiple cohorts
 
     if (!user) return res.status(404).json({ message: "User not found." });
 
@@ -629,32 +729,106 @@ export const updateUserStatus = async (req, res) => {
 
 export const assignUserToCohort = async (req, res) => {
   try {
-    const { cohortId } = req.body;
+    const { cohortId, action = "set", cohortIds } = req.body;
+
     const user = await User.findById(req.params.userId);
     if (!user) return res.status(404).json({ message: "User not found." });
 
     if (cohortId) {
       const cohort = await Cohort.findById(cohortId);
-      if (!cohort)
+      if (!cohort) {
         return res.status(404).json({ message: "Cohort not found." });
+      }
     }
 
-    user.cohortId = cohortId || null;
-    await user.save();
+    // ── Students: single cohortId only ─────────────────────────────
+    if (user.role === "student") {
+      user.cohortId = cohortId || null;
+      await user.save();
+
+      return res.status(200).json({
+        message: cohortId
+          ? "Student assigned to cohort."
+          : "Student removed from cohort.",
+        user: {
+          id: user._id,
+          fullName: user.fullName,
+          role: user.role,
+          cohortId: user.cohortId,
+        },
+      });
+    }
+
+    // ── Instructors ────────────────────────────────────────────────
+    if (user.role !== "instructor") {
+      return res.status(400).json({ message: "Unsupported role." });
+    }
+
+    if (!Array.isArray(user.cohortIds)) {
+      user.cohortIds = [];
+    }
+
+    if (action === "add" && cohortId) {
+      // Transfer ownership of this cohort to this instructor only
+      await setCohortInstructor(cohortId, user._id);
+    } else if (action === "remove" && cohortId) {
+      // Unassign only if this instructor currently owns it
+      const cohort = await Cohort.findById(cohortId);
+      if (
+        cohort?.instructorId &&
+        String(cohort.instructorId) === String(user._id)
+      ) {
+        await setCohortInstructor(cohortId, null);
+      } else {
+        // Still strip from their array if stale
+        user.cohortIds = user.cohortIds.filter(
+          (id) => String(id) !== String(cohortId),
+        );
+        await user.save();
+      }
+    } else if (action === "set") {
+      const desired = Array.isArray(cohortIds)
+        ? cohortIds.map(String)
+        : cohortId
+          ? [String(cohortId)]
+          : [];
+
+      // Current owned cohorts (from Cohort.instructorId is source of truth)
+      const currentlyOwned = await Cohort.find({
+        instructorId: user._id,
+      }).select("_id");
+
+      const currentIds = currentlyOwned.map((c) => String(c._id));
+
+      // Remove cohorts no longer in desired list
+      for (const id of currentIds) {
+        if (!desired.includes(id)) {
+          await setCohortInstructor(id, null);
+        }
+      }
+
+      // Assign each desired cohort to this instructor (moves off anyone else)
+      for (const id of desired) {
+        await setCohortInstructor(id, user._id);
+      }
+    }
+
+    const populated = await User.findById(user._id)
+      .select("-passwordHash")
+      .populate("cohortIds", "name code")
+      .populate("cohortId", "name code");
 
     res.status(200).json({
-      message: cohortId
-        ? "User assigned to cohort."
-        : "User removed from cohort.",
-      user: {
-        id: user._id,
-        fullName: user.fullName,
-        role: user.role,
-        cohortId: user.cohortId,
-      },
+      message: "Instructor cohorts updated.",
+      user: populated,
     });
   } catch (err) {
     console.error(err);
+    if (err.status === 404) {
+      return res.status(404).json({
+        message: String(err.message).replace(/_/g, " ").toLowerCase(),
+      });
+    }
     res.status(500).json({ message: "Failed to assign cohort." });
   }
 };
@@ -1028,10 +1202,40 @@ export const evaluateGraduationEligibility = async (req, res) => {
           : Promise.resolve([]),
       ]);
 
-    const unlocked = milestones.filter((m) => m.isUnlocked).length;
+    // ── Milestone progress (per-student, from StudentProgress) ──────────────
+    // Do NOT use Milestone.isUnlocked — that is a global course flag and leaks
+    // progress across all students on the same course.
+    const progress = await StudentProgress.findOne({
+      studentId: student._id,
+      courseId,
+    });
+
+    const completedSet = new Set(
+      (progress?.completedSegmentIds || []).map((id) => String(id)),
+    );
+
+    const segments = await Segment.find({
+      milestoneId: { $in: milestones.map((m) => m._id) },
+    }).select("milestoneId _id");
+
+    let completedMilestones = 0;
+    for (const m of milestones) {
+      const segs = segments.filter(
+        (s) => String(s.milestoneId) === String(m._id),
+      );
+      // Same rule as studentController: only count when the milestone has
+      // segments AND every one of them is in this student's completed set
+      if (
+        segs.length > 0 &&
+        segs.every((s) => completedSet.has(String(s._id)))
+      ) {
+        completedMilestones += 1;
+      }
+    }
+
     const milestoneProgress =
       milestones.length > 0
-        ? Math.round((unlocked / milestones.length) * 100)
+        ? Math.round((completedMilestones / milestones.length) * 100)
         : 0;
 
     const soloScores = [];
@@ -1563,5 +1767,87 @@ export const updateAssessment = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to update assessment." });
+  }
+};
+
+export const deleteUser = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) {
+      return res.status(404).json({ message: "User not found." });
+    }
+    if (user.deletedAt) {
+      return res.status(400).json({ message: "User is already deleted." });
+    }
+
+    if (user.role === "instructor") {
+      const owned = await Cohort.find({ instructorId: user._id }).select("_id");
+      for (const c of owned) {
+        await Cohort.findByIdAndUpdate(c._id, { instructorId: null });
+      }
+      user.cohortIds = [];
+      user.cohortId = undefined;
+    }
+
+    // Soft delete — keep row for accountability; block login via deletedAt check
+    user.deletedAt = new Date();
+    user.deletedByAdminId = req.adminId || null;
+    user.deletedEmail = user.email;
+    user.deletedFullName = user.fullName;
+    user.status = "suspended";
+    // Invalidate credentials without exposing password
+    user.passwordHash = await bcrypt.hash(
+      `deleted-${user._id}-${Date.now()}`,
+      10,
+    );
+    // Free email so a new user can be provisioned with same address
+    user.email = `deleted+${user._id}@deleted.local`;
+    await user.save();
+
+    res.status(200).json({
+      message: "User permanently deactivated and archived.",
+      deleted: {
+        id: user._id,
+        fullName: user.deletedFullName,
+        email: user.deletedEmail,
+        role: user.role,
+        deletedAt: user.deletedAt,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to delete user." });
+  }
+};
+
+export const getDeletedUsers = async (req, res) => {
+  try {
+    const users = await User.find({ deletedAt: { $ne: null } })
+      .select(
+        "deletedFullName deletedEmail role deletedAt deletedByAdminId createdAt",
+      )
+      .populate("deletedByAdminId", "name email")
+      .sort({ deletedAt: -1 })
+      .limit(100);
+
+    res.status(200).json({
+      users: users.map((u) => ({
+        id: u._id,
+        fullName: u.deletedFullName || "—",
+        email: u.deletedEmail || "—",
+        role: u.role,
+        deletedAt: u.deletedAt,
+        deletedBy: u.deletedByAdminId
+          ? {
+              name: u.deletedByAdminId.name,
+              email: u.deletedByAdminId.email,
+            }
+          : null,
+        createdAt: u.createdAt,
+      })),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch deleted users." });
   }
 };
