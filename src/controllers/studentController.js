@@ -35,10 +35,6 @@ const CLASS_THEME = {
   badgeBg: "rgba(16, 185, 129, 0.18)",
 };
 
-/**
- * Canonical student context — always scoped to the logged-in user.
- * Never returns another student's data.
- */
 async function getStudentContext(userId) {
   const user = await User.findById(userId).populate({
     path: "cohortId",
@@ -92,17 +88,17 @@ function idSet(ids = []) {
   return new Set(ids.map((id) => String(id)));
 }
 
-/** Ensure a resource's courseId matches the student's course */
+
 function assertSameCourse(resourceCourseId, studentCourseId) {
   if (!resourceCourseId || !studentCourseId) return false;
   return String(resourceCourseId) === String(studentCourseId);
 }
 
-// ── Notifications ────────────────────────────────────────────────────────────
+
 
 export const clearStudentNotifications = async (req, res) => {
   try {
-    // Only the logged-in student's notifications
+    
     await Notification.updateMany(
       { studentId: req.userId, isRead: false },
       { $set: { isRead: true } },
@@ -780,8 +776,6 @@ export const getStudentAttendance = async (req, res) => {
     res.status(500).json({ message: "Error fetching attendance." });
   }
 };
-
-// ── Badges ───────────────────────────────────────────────────────────────────
 async function computeStudentMetrics(userId) {
   const ctx = await getStudentContext(userId);
   if (!ctx?.user) return null;
@@ -935,7 +929,6 @@ export const getStudentChallenges = async (req, res) => {
   }
 };
 
-// ── Dashboard ────────────────────────────────────────────────────────────────
 
 export const getStudentDashboard = async (req, res) => {
   try {
@@ -993,7 +986,7 @@ export const getStudentDashboard = async (req, res) => {
   }
 };
 
-// ── Schedule ─────────────────────────────────────────────────────────────────
+
 
 export const getStudentSchedule = async (req, res) => {
   try {
@@ -1100,8 +1093,6 @@ export const getStudentSchedule = async (req, res) => {
   }
 };
 
-// ── Milestones & Segments ────────────────────────────────────────────────────
-
 export const getStudentMilestones = async (req, res) => {
   try {
     const ctx = await getStudentContext(req.userId);
@@ -1196,7 +1187,7 @@ export const getStudentMilestoneById = async (req, res) => {
       return res.status(404).json({ message: "Milestone not found." });
     }
 
-    // Isolation
+
     if (!assertSameCourse(milestone.courseId, ctx.courseId)) {
       return res.status(403).json({ message: "Not allowed." });
     }
@@ -1428,7 +1419,6 @@ export const completeStudentSegment = async (req, res) => {
       return res.status(404).json({ message: "Segment not found." });
     }
 
-    // Per-student progress only — never mutates global segment state
     const progress = await getOrCreateProgress(req.userId, ctx.courseId);
     const already = progress.completedSegmentIds.some(
       (id) => String(id) === String(segment._id),
@@ -1511,7 +1501,7 @@ export async function evaluateAndAwardBadges(userId) {
       });
       newlyAwarded.push(def.key);
     } catch (e) {
-      // duplicate key → already awarded
+      
       if (e?.code !== 11000) throw e;
     }
   }
