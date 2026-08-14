@@ -6,7 +6,7 @@ const challengeSchema = new mongoose.Schema(
     title: { type: String, required: true }, // maps to sender in UI
     description: { type: String, required: true }, // maps to message
     xpReward: { type: Number, default: 100 }, // maps to time tag e.g. "500 XP"
-    avatar: { type: String, default: "/temp-instructor-asset/instructor.jpg" },
+    avatar: { type: String, default: "/default.jpg" },
     bgColor: { type: String, default: "bg-[#FFB800]" },
     cohortId: {
       type: mongoose.Schema.Types.ObjectId,

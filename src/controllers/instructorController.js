@@ -379,7 +379,7 @@ export const sendStudentNotification = async (req, res) => {
       cohortId: student.cohortId,
       sender: instructor?.fullName || instructor?.name || "Instructor",
       message: message.trim(),
-      avatar: instructor?.avatar || "/temp-instructor-asset/instructor.jpg",
+      avatar: instructor?.avatar || "/default.jpg",
       bgColor: "bg-[#CB96EC]",
       type: "instructor",
       isRead: false,
@@ -685,7 +685,7 @@ export const getInstructorDashboard = async (req, res) => {
         id: instructor._id.toString(),
         name: instructor.fullName || instructor.name || "Instructor",
         email: instructor.email,
-        avatar: instructor.avatar || "/temp-instructor-asset/instructor.jpg",
+        avatar: instructor.avatar || "/default.jpg",
         title: "Gold star Facilitator",
         joinedAt: instructor.createdAt,
       },
@@ -1326,7 +1326,7 @@ export const getInstructorSoloById = async (req, res) => {
 
         if (sub && sub.status === "graded") {
           let graderName = "Instructor";
-          let graderAvatar = "/temp-instructor-asset/instructor.jpg";
+          let graderAvatar = "/default.jpg";
 
           const graderId = sub.gradedBy || sub.gradedByInstructorId || null;
           if (graderId) {
@@ -1402,7 +1402,7 @@ export const getStudentNotificationsForInstructor = async (req, res) => {
         id: n._id.toString(),
         sender: n.sender || "Instructor",
         message: n.message,
-        avatar: n.avatar || "/temp-instructor-asset/instructor.jpg",
+        avatar: n.avatar || "/default.jpg",
         type: n.type || "instructor",
         isRead: Boolean(n.isRead),
         createdAt: n.createdAt,

@@ -16,7 +16,7 @@ const notificationSchema = new mongoose.Schema(
     },
     sender: { type: String, required: true }, // "From Instructor", "System Alert", etc.
     message: { type: String, required: true },
-    avatar: { type: String, default: "/temp-instructor-asset/instructor.jpg" },
+    avatar: { type: String, default: "/default.jpg" },
     bgColor: { type: String, default: "bg-[#CB96EC]" },
     type: {
       type: String,
