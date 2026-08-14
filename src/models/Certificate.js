@@ -46,10 +46,13 @@ const certificateSchema = new mongoose.Schema(
 
     // Final metrics recorded at graduation
     metrics: {
-      progress: { type: Number, default: 0 }, // e.g. 92
-      attendancePct: { type: Number, default: 0 }, // e.g. 88
-      bestSoloScore: { type: Number, default: 0 }, // e.g. 85
+      progress: { type: Number, default: 0 },
+      attendancePct: { type: Number, default: 0 },
+      bestSoloScore: { type: Number, default: 0 },
+      soloAverage: { type: Number, default: 0 },
+      assessmentAverage: { type: Number, default: 0 },
     },
+    forceGraduated: { type: Boolean, default: false },
 
     // When it was issued
     issuedAt: {

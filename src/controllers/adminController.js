@@ -1333,9 +1333,31 @@ export const evaluateGraduationEligibility = async (req, res) => {
 
 export const graduateStudent = async (req, res) => {
   try {
+    const force = Boolean(req.body?.force);
+
     const student = await User.findById(req.params.studentId);
     if (!student || student.role !== "student") {
       return res.status(404).json({ message: "Student not found." });
+    }
+
+    if (student.status === "graduated") {
+      // already graduated – return existing certificate if present
+      const existing = await Certificate.findOne({
+        studentId: student._id,
+        status: "issued",
+      }).sort({ issuedAt: -1 });
+
+      return res.status(200).json({
+        message: "Student is already graduated.",
+        student: {
+          id: student._id,
+          fullName: student.fullName,
+          status: student.status,
+          graduatedAt: student.graduatedAt,
+        },
+        certificateNumber: existing?.certificateNumber || null,
+        certificate: existing || null,
+      });
     }
 
     const cohort = await Cohort.findById(student.cohortId).populate("courseId");
@@ -1343,12 +1365,236 @@ export const graduateStudent = async (req, res) => {
       return res.status(400).json({ message: "Student has no valid cohort." });
     }
 
+    // ── Eligibility check (skip when force=true) ──────────────────────────
+    if (!force) {
+      // Re-use the same logic as evaluateGraduationEligibility
+      const courseId = cohort.courseId?._id || cohort.courseId;
+
+      let settings = await GraduationSettings.findOne({ courseId });
+      if (!settings) {
+        settings = await GraduationSettings.findOne({ courseId: null });
+      }
+      if (!settings) {
+        settings = {
+          minMilestoneProgress: 100,
+          minSoloAverage: 60,
+          minAssessmentAverage: 60,
+          mustCompleteAllAssessments: true,
+          requireAllSolosGraded: false,
+          minAttendancePct: 0,
+        };
+      }
+
+      const [milestones, solos, assessments, attendanceRecords] =
+        await Promise.all([
+          Milestone.find({ courseId }).sort({ order: 1 }),
+          Solo.find({ courseId }),
+          Assessment.find({ courseId }),
+          settings.minAttendancePct > 0
+            ? Attendance.find({
+                studentId: student._id,
+                cohortId: student.cohortId,
+              })
+            : Promise.resolve([]),
+        ]);
+
+      const progress = await StudentProgress.findOne({
+        studentId: student._id,
+        courseId,
+      });
+
+      const completedSet = new Set(
+        (progress?.completedSegmentIds || []).map((id) => String(id)),
+      );
+
+      const segments = await Segment.find({
+        milestoneId: { $in: milestones.map((m) => m._id) },
+      }).select("milestoneId _id");
+
+      let completedMilestones = 0;
+      for (const m of milestones) {
+        const segs = segments.filter(
+          (s) => String(s.milestoneId) === String(m._id),
+        );
+        if (
+          segs.length > 0 &&
+          segs.every((s) => completedSet.has(String(s._id)))
+        ) {
+          completedMilestones += 1;
+        }
+      }
+
+      const milestoneProgress =
+        milestones.length > 0
+          ? Math.round((completedMilestones / milestones.length) * 100)
+          : 0;
+
+      const soloScores = [];
+      let gradedSoloCount = 0;
+      for (const solo of solos) {
+        const sub = solo.submissions?.find(
+          (s) =>
+            s.studentId.toString() === student._id.toString() &&
+            s.status === "graded",
+        );
+        if (sub) {
+          gradedSoloCount += 1;
+          soloScores.push(sub.scorePercentage ?? sub.totalScore ?? 0);
+        }
+      }
+      const soloAverage =
+        soloScores.length > 0
+          ? Math.round(
+              soloScores.reduce((a, b) => a + b, 0) / soloScores.length,
+            )
+          : 0;
+
+      const assessmentScores = [];
+      for (const a of assessments) {
+        const attempt = a.attempts?.find(
+          (att) =>
+            att.studentId.toString() === student._id.toString() &&
+            att.status === "completed",
+        );
+        if (attempt && typeof attempt.scorePercentage === "number") {
+          assessmentScores.push(attempt.scorePercentage);
+        }
+      }
+      const assessmentAverage =
+        assessmentScores.length > 0
+          ? Math.round(
+              assessmentScores.reduce((a, b) => a + b, 0) /
+                assessmentScores.length,
+            )
+          : 0;
+
+      const assessmentsCompleted = assessmentScores.length;
+      const totalAssessments = assessments.length;
+      const totalSolos = solos.length;
+
+      let attendancePct = 0;
+      if (settings.minAttendancePct > 0 && attendanceRecords.length > 0) {
+        const present = attendanceRecords.filter(
+          (r) => r.status === "present" || r.status === "late",
+        ).length;
+        attendancePct = Math.round((present / attendanceRecords.length) * 100);
+      }
+
+      const eligible =
+        milestoneProgress >= settings.minMilestoneProgress &&
+        soloAverage >= settings.minSoloAverage &&
+        assessmentAverage >= settings.minAssessmentAverage &&
+        (!settings.mustCompleteAllAssessments ||
+          assessmentsCompleted === totalAssessments) &&
+        (!settings.requireAllSolosGraded || gradedSoloCount === totalSolos) &&
+        (settings.minAttendancePct <= 0 ||
+          attendancePct >= settings.minAttendancePct) &&
+        ["enrolled", "active"].includes(student.status);
+
+      if (!eligible) {
+        return res.status(400).json({
+          message:
+            "Student does not meet graduation criteria. Use force=true to override.",
+          eligible: false,
+        });
+      }
+    }
+
+    // ── Build metrics snapshot (always) ───────────────────────────────────
+    const courseId = cohort.courseId?._id || cohort.courseId;
+
+    const [milestones, solos, assessments, attendanceRecords] =
+      await Promise.all([
+        Milestone.find({ courseId }).sort({ order: 1 }),
+        Solo.find({ courseId }),
+        Assessment.find({ courseId }),
+        Attendance.find({
+          studentId: student._id,
+          cohortId: student.cohortId,
+        }),
+      ]);
+
+    const progress = await StudentProgress.findOne({
+      studentId: student._id,
+      courseId,
+    });
+
+    const completedSet = new Set(
+      (progress?.completedSegmentIds || []).map((id) => String(id)),
+    );
+
+    const segments = await Segment.find({
+      milestoneId: { $in: milestones.map((m) => m._id) },
+    }).select("milestoneId _id");
+
+    let completedMilestones = 0;
+    for (const m of milestones) {
+      const segs = segments.filter(
+        (s) => String(s.milestoneId) === String(m._id),
+      );
+      if (
+        segs.length > 0 &&
+        segs.every((s) => completedSet.has(String(s._id)))
+      ) {
+        completedMilestones += 1;
+      }
+    }
+
+    const milestoneProgress =
+      milestones.length > 0
+        ? Math.round((completedMilestones / milestones.length) * 100)
+        : 0;
+
+    const soloScores = [];
+    for (const solo of solos) {
+      const sub = solo.submissions?.find(
+        (s) =>
+          s.studentId.toString() === student._id.toString() &&
+          s.status === "graded",
+      );
+      if (sub) {
+        soloScores.push(sub.scorePercentage ?? sub.totalScore ?? 0);
+      }
+    }
+    const bestSoloScore = soloScores.length > 0 ? Math.max(...soloScores) : 0;
+    const soloAverage =
+      soloScores.length > 0
+        ? Math.round(soloScores.reduce((a, b) => a + b, 0) / soloScores.length)
+        : 0;
+
+    const assessmentScores = [];
+    for (const a of assessments) {
+      const attempt = a.attempts?.find(
+        (att) =>
+          att.studentId.toString() === student._id.toString() &&
+          att.status === "completed",
+      );
+      if (attempt && typeof attempt.scorePercentage === "number") {
+        assessmentScores.push(attempt.scorePercentage);
+      }
+    }
+    const assessmentAverage =
+      assessmentScores.length > 0
+        ? Math.round(
+            assessmentScores.reduce((a, b) => a + b, 0) /
+              assessmentScores.length,
+          )
+        : 0;
+
+    let attendancePct = 0;
+    if (attendanceRecords.length > 0) {
+      const present = attendanceRecords.filter(
+        (r) => r.status === "present" || r.status === "late",
+      ).length;
+      attendancePct = Math.round((present / attendanceRecords.length) * 100);
+    }
+
     const certNumber = `CHEZA-${new Date().getFullYear()}-${student._id
       .toString()
       .slice(-6)
       .toUpperCase()}`;
 
-    await Certificate.findOneAndUpdate(
+    const certificate = await Certificate.findOneAndUpdate(
       { studentId: student._id, cohortId: cohort._id },
       {
         studentId: student._id,
@@ -1357,9 +1603,17 @@ export const graduateStudent = async (req, res) => {
         studentName: student.fullName,
         courseTitle: cohort.courseId?.title || "Course",
         cohortName: cohort.name,
+        metrics: {
+          progress: milestoneProgress,
+          attendancePct,
+          bestSoloScore,
+          soloAverage,
+          assessmentAverage,
+        },
         issuedByAdminId: req.adminId,
         issuedAt: new Date(),
         status: "issued",
+        forceGraduated: force,
       },
       { upsert: true, new: true },
     );
@@ -1372,23 +1626,50 @@ export const graduateStudent = async (req, res) => {
       studentId: student._id,
       cohortId: student.cohortId,
       sender: "Administration",
-      message: "Congratulations! You have successfully graduated.",
+      message: force
+        ? "You have been graduated by an administrator."
+        : "Congratulations! You have successfully graduated.",
       type: "system",
       bgColor: "bg-green-500",
     });
 
     res.status(200).json({
-      message: "Student graduated and certificate issued.",
+      message: force
+        ? "Student force-graduated and certificate issued."
+        : "Student graduated and certificate issued.",
       student: {
         id: student._id,
         fullName: student.fullName,
         status: student.status,
+        graduatedAt: student.graduatedAt,
       },
       certificateNumber: certNumber,
+      certificate,
     });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to graduate student." });
+  }
+};
+
+export const getStudentCertificate = async (req, res) => {
+  try {
+    const cert = await Certificate.findOne({
+      studentId: req.params.studentId,
+      status: "issued",
+    })
+      .populate("cohortId", "name code")
+      .populate("issuedByAdminId", "name email")
+      .sort({ issuedAt: -1 });
+
+    if (!cert) {
+      return res.status(404).json({ message: "No certificate found." });
+    }
+
+    res.status(200).json({ certificate: cert });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch certificate." });
   }
 };
 
@@ -1883,25 +2164,22 @@ export const adminListBadges = async (req, res) => {
  */
 export const adminCreateBadge = async (req, res) => {
   try {
-    const {
-      name,
-      key,
-      imageUrl,
-      description,
-      color,
-      accentHex,
-      order,
-      rules,
-    } = req.body;
+    const { name, key, imageUrl, description, color, accentHex, order, rules } =
+      req.body;
 
     if (!name?.trim()) {
-      return res.status(400).json({ message: "Badge name (title) is required." });
+      return res
+        .status(400)
+        .json({ message: "Badge name (title) is required." });
     }
 
     const cleanName = name.trim();
     const badgeKey =
       (key && String(key).trim().toLowerCase().replace(/\s+/g, "-")) ||
-      cleanName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+      cleanName
+        .toLowerCase()
+        .replace(/\s+/g, "-")
+        .replace(/[^a-z0-9-]/g, "");
 
     if (!badgeKey) {
       return res.status(400).json({ message: "Could not derive a badge key." });
@@ -1919,14 +2197,18 @@ export const adminCreateBadge = async (req, res) => {
         });
       }
       if (isData && s.length > 7 * 1024 * 1024) {
-        return res.status(400).json({ message: "Image too large (max ~5 MB)." });
+        return res
+          .status(400)
+          .json({ message: "Image too large (max ~5 MB)." });
       }
       cleanImage = s;
     }
 
     const existing = await BadgeDefinition.findOne({ key: badgeKey });
     if (existing) {
-      return res.status(409).json({ message: "A badge with this key already exists." });
+      return res
+        .status(409)
+        .json({ message: "A badge with this key already exists." });
     }
 
     const badge = await BadgeDefinition.create({

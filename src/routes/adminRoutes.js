@@ -48,7 +48,8 @@ import {
   adminListBadges,
   adminCreateBadge,
   adminUpdateBadge,
-  adminDeleteBadge
+  adminDeleteBadge,
+  getStudentCertificate,
 } from "../controllers/adminController.js";
 import { requireAdmin } from "../middleware/adminAuth.js";
 import { Router } from "express";
@@ -126,6 +127,7 @@ router.patch("/solos/:soloId", updateSolo);
 // Graduation
 router.get("/graduation-settings", getGraduationSettings);
 router.put("/graduation-settings", updateGraduationSettings);
+router.get("/students/:studentId/certificate", getStudentCertificate);
 router.get("/students/:studentId/eligibility", evaluateGraduationEligibility);
 router.post("/students/:studentId/graduate", graduateStudent);
 
