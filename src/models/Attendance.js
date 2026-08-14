@@ -1,7 +1,6 @@
-// src/models/Attendace.js
+// src/models/Attendace.js  (or Attendance.js — match your import)
 import mongoose from "mongoose";
 
-// One record per student per class session (instructor marks present/absent)
 const attendanceSchema = new mongoose.Schema(
   {
     studentId: {
@@ -14,12 +13,21 @@ const attendanceSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Cohort",
       required: true,
+      index: true,
     },
+    // New: link to ClassSession (attendance page)
+    sessionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ClassSession",
+      index: true,
+    },
+    // Legacy calendar / schedule events
     scheduleEventId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "ScheduleEvent",
     },
-    date: { type: String, required: true }, // "2026-08-03"
+    // "2026-08-03"
+    date: { type: String, required: true, index: true },
     status: {
       type: String,
       enum: ["present", "absent", "late", "excused"],
@@ -27,12 +35,21 @@ const attendanceSchema = new mongoose.Schema(
     },
     markedBy: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "User", // instructor
+      ref: "User",
     },
+    markedAt: { type: Date, default: Date.now },
   },
   { timestamps: true },
 );
 
+// Prefer one row per student per class session when sessionId is set
+attendanceSchema.index(
+  { sessionId: 1, studentId: 1 },
+  { unique: true, sparse: true },
+);
+
+// Legacy uniqueness
 attendanceSchema.index({ studentId: 1, date: 1, scheduleEventId: 1 });
 
-export default mongoose.model("Attendance", attendanceSchema);
+export default mongoose.models.Attendance ||
+  mongoose.model("Attendance", attendanceSchema);

@@ -782,83 +782,101 @@ export const getStudentAttendance = async (req, res) => {
 };
 
 // ── Badges ───────────────────────────────────────────────────────────────────
+async function computeStudentMetrics(userId) {
+  const ctx = await getStudentContext(userId);
+  if (!ctx?.user) return null;
+
+  const studentIdStr = String(userId);
+  let attendancePercent = 0;
+  let soloAvg = 0;
+  let assessmentAvg = 0;
+  let activityScore = 0;
+  let parts = 0;
+
+  if (ctx.cohortId) {
+    const records = await Attendance.find({
+      studentId: userId,
+      cohortId: ctx.cohortId,
+    });
+    if (records.length > 0) {
+      const present = records.filter(
+        (r) => r.status === "present" || r.status === "late",
+      ).length;
+      attendancePercent = Math.round((present / records.length) * 100);
+      activityScore += attendancePercent;
+      parts += 1;
+    }
+  }
+
+  if (ctx.courseId) {
+    const solos = await Solo.find({ courseId: ctx.courseId });
+    const graded = solos
+      .map((s) =>
+        s.submissions?.find(
+          (sub) => String(sub.studentId?._id || sub.studentId) === studentIdStr,
+        ),
+      )
+      .filter(
+        (sub) =>
+          sub?.status === "graded" &&
+          (typeof sub.scorePercentage === "number" ||
+            typeof sub.score === "number" ||
+            typeof sub.totalScore === "number"),
+      );
+
+    if (graded.length > 0) {
+      soloAvg = Math.round(
+        graded.reduce(
+          (a, s) => a + (s.scorePercentage ?? s.score ?? s.totalScore ?? 0),
+          0,
+        ) / graded.length,
+      );
+      activityScore += soloAvg;
+      parts += 1;
+    }
+
+    const assessments = await Assessment.find({ courseId: ctx.courseId });
+    const scores = [];
+    for (const a of assessments) {
+      const att = a.attempts?.find(
+        (x) => String(x.studentId) === studentIdStr && x.status === "completed",
+      );
+      if (att && typeof att.scorePercentage === "number") {
+        scores.push(att.scorePercentage);
+      }
+    }
+    if (scores.length > 0) {
+      assessmentAvg = Math.round(
+        scores.reduce((a, n) => a + n, 0) / scores.length,
+      );
+      activityScore += assessmentAvg;
+      parts += 1;
+    }
+  }
+
+  return {
+    attendancePercent,
+    soloAvg,
+    assessmentAvg,
+    activityScore: parts > 0 ? Math.round(activityScore / parts) : 0,
+  };
+}
 
 export const getStudentBadges = async (req, res) => {
   try {
+    await evaluateAndAwardBadges(req.userId);
+
     const definitions = await BadgeDefinition.find().sort({ order: 1 });
     const earned = await StudentBadge.find({ studentId: req.userId });
     const earnedKeys = earned.map((e) => e.badgeKey);
 
-    const ctx = await getStudentContext(req.userId);
-    let activityScore = 0;
-    let parts = 0;
-
-    if (ctx.cohortId) {
-      const records = await Attendance.find({
-        studentId: req.userId,
-        cohortId: ctx.cohortId,
-      });
-      if (records.length > 0) {
-        const present = records.filter(
-          (r) => r.status === "present" || r.status === "late",
-        ).length;
-        activityScore += Math.round((present / records.length) * 100);
-        parts += 1;
-      }
-    }
-
-    if (ctx.courseId) {
-      const solos = await Solo.find({ courseId: ctx.courseId });
-      const studentIdStr = String(req.userId);
-      const graded = solos
-        .map((s) =>
-          s.submissions?.find(
-            (sub) =>
-              String(sub.studentId?._id || sub.studentId) === studentIdStr,
-          ),
-        )
-        .filter(
-          (sub) =>
-            sub?.status === "graded" &&
-            (typeof sub.score === "number" ||
-              typeof sub.scorePercentage === "number" ||
-              typeof sub.totalScore === "number"),
-        );
-      if (graded.length > 0) {
-        activityScore += Math.round(
-          graded.reduce(
-            (a, s) => a + (s.scorePercentage ?? s.score ?? s.totalScore ?? 0),
-            0,
-          ) / graded.length,
-        );
-        parts += 1;
-      }
-
-      const assessments = await Assessment.find({ courseId: ctx.courseId });
-      const scores = [];
-      for (const a of assessments) {
-        const att = a.attempts?.find(
-          (x) =>
-            String(x.studentId) === studentIdStr && x.status === "completed",
-        );
-        if (att && typeof att.scorePercentage === "number") {
-          scores.push(att.scorePercentage);
-        }
-      }
-      if (scores.length > 0) {
-        activityScore += Math.round(
-          scores.reduce((a, n) => a + n, 0) / scores.length,
-        );
-        parts += 1;
-      }
-    }
-
-    const progressPercent = parts > 0 ? Math.round(activityScore / parts) : 0;
+    const metrics = await computeStudentMetrics(req.userId);
+    const progressPercent = metrics?.activityScore ?? 0;
 
     const badges = definitions.map((d) => ({
       id: d.key,
       name: d.name,
-      imageUrl: d.imageUrl,
+      imageUrl: d.imageUrl || null,
       color: d.color,
       accentHex: d.accentHex,
       description: d.description,
@@ -875,30 +893,35 @@ export const getStudentBadges = async (req, res) => {
     res.status(500).json({ message: "Error fetching badges." });
   }
 };
-
-// ── Challenges ───────────────────────────────────────────────────────────────
-
 export const getStudentChallenges = async (req, res) => {
   try {
     const ctx = await getStudentContext(req.userId);
     if (ctx.error) {
       return res.status(ctx.error.status).json({ message: ctx.error.message });
     }
+    if (!ctx.cohortId) {
+      return res.status(200).json({ challenges: [] });
+    }
+
+    const studentIdStr = String(req.userId);
 
     const challenges = await Challenge.find({
       cohortId: ctx.cohortId,
       isActive: true,
+      $or: [
+        { studentId: null },
+        { studentId: { $exists: false } },
+        { studentId: req.userId },
+      ],
     }).sort({ createdAt: -1 });
-
-    const studentIdStr = String(req.userId);
 
     const formatted = challenges.map((c) => ({
       id: c._id,
-      avatar: c.avatar,
+      avatar: c.avatar || "/default.jpg",
       sender: c.title,
       message: c.description,
-      time: `${c.xpReward} XP`,
-      bgColor: c.bgColor,
+      time: `${c.xpReward ?? 100} XP`,
+      bgColor: c.bgColor || "bg-[#FFB800]",
       challengeId: c._id,
       completed: c.completions?.some(
         (x) => String(x.studentId) === studentIdStr,
@@ -1454,3 +1477,44 @@ export const completeStudentSegment = async (req, res) => {
     res.status(500).json({ message: "Failed to complete segment." });
   }
 };
+
+/** Award any badges this student newly qualifies for (idempotent). */
+export async function evaluateAndAwardBadges(userId) {
+  const metrics = await computeStudentMetrics(userId);
+  if (!metrics) return [];
+
+  const definitions = await BadgeDefinition.find().lean();
+  const already = await StudentBadge.find({ studentId: userId })
+    .select("badgeKey")
+    .lean();
+  const owned = new Set(already.map((b) => b.badgeKey));
+
+  const newlyAwarded = [];
+
+  for (const def of definitions) {
+    if (owned.has(def.key)) continue;
+
+    const r = def.rules || {};
+    const ok =
+      (r.minAttendancePercent || 0) <= metrics.attendancePercent &&
+      (r.minSoloAvg || 0) <= metrics.soloAvg &&
+      (r.minAssessmentAvg || 0) <= metrics.assessmentAvg &&
+      (r.minActivityScore || 0) <= metrics.activityScore;
+
+    if (!ok) continue;
+
+    try {
+      await StudentBadge.create({
+        studentId: userId,
+        badgeKey: def.key,
+        awardedAt: new Date(),
+      });
+      newlyAwarded.push(def.key);
+    } catch (e) {
+      // duplicate key → already awarded
+      if (e?.code !== 11000) throw e;
+    }
+  }
+
+  return newlyAwarded;
+}

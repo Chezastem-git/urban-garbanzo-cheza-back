@@ -17,7 +17,9 @@ import {
   getInstructorSolos,
   getInstructorSoloById,
   getStudentNotificationsForInstructor,
-  getInstructorSchedule
+  getInstructorSchedule,
+  createStudentChallenge,
+  getStudentChallengesForInstructor,
 } from "../controllers/instructorController.js";
 import {
   getInstructorSessions,
@@ -28,21 +30,28 @@ const router = Router();
 router.use(requireUserAuth);
 
 router.get("/dashboard", getInstructorDashboard);
-router.get("/schedule",  getInstructorSchedule);
+router.get("/schedule", getInstructorSchedule);
 
 // ── Solos: static paths BEFORE :soloId ───────────────────────────────
 router.get("/solos", getInstructorSolos);
-router.get("/solos/submissions", getInstructorSoloSubmissions); // ← must be above :soloId
+router.get("/solos/submissions", getInstructorSoloSubmissions);
 router.post(
   "/solos/:soloId/submissions/:submissionId/grade",
   gradeSoloSubmission,
 );
+router.get("/solos/:soloId", getInstructorSoloById);
 
+// ── Per-student: notifications + challenges ──────────────────────────
 router.get(
   "/students/:studentId/notifications",
   getStudentNotificationsForInstructor,
 );
-router.get("/solos/:soloId", getInstructorSoloById); // ← param route last
+router.get(
+  "/students/:studentId/challenges",
+  getStudentChallengesForInstructor,
+);
+router.post("/students/:studentId/challenges", createStudentChallenge);
+router.post("/students/:studentId/notify", sendStudentNotification);
 
 router.get("/courses", getInstructorCourses);
 router.get("/courses/:courseId", getInstructorCourseById);
@@ -56,6 +65,5 @@ router.get("/assessments/:assessmentId", getInstructorAssessmentById);
 router.get("/cohorts", getInstructorCohorts);
 router.get("/cohorts/:slug", getInstructorCohortBySlug);
 router.get("/cohorts/:slug/students/:studentId", getInstructorStudentDetail);
-router.post("/students/:studentId/notify", sendStudentNotification);
 
 export default router;

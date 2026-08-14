@@ -15,6 +15,8 @@ import GraduationSettings from "../models/GraduationSettings.js";
 import Segment from "../models/Segment.js";
 import StudentProgress from "../models/StudentProgress.js";
 
+import { BadgeDefinition, StudentBadge } from "../models/Badge.js";
+
 // import Cohort from "../models/Cohort.js";
 // import Course from "../models/Course.js";
 import ClassSession from "../models/ClassSession.js";
@@ -1849,5 +1851,196 @@ export const getDeletedUsers = async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to fetch deleted users." });
+  }
+};
+
+export const adminListBadges = async (req, res) => {
+  try {
+    const badges = await BadgeDefinition.find().sort({ order: 1 }).lean();
+    res.status(200).json({
+      badges: badges.map((b) => ({
+        id: b._id.toString(),
+        key: b.key,
+        name: b.name,
+        imageUrl: b.imageUrl || null,
+        color: b.color,
+        accentHex: b.accentHex,
+        description: b.description,
+        order: b.order,
+        rules: b.rules || {},
+      })),
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to list badges." });
+  }
+};
+
+/**
+ * POST /api/admin/badges
+ * body: { name, key?, imageUrl, description?, color?, accentHex?, order?, rules? }
+ * imageUrl: data:image/... from computer OR /path under public
+ */
+export const adminCreateBadge = async (req, res) => {
+  try {
+    const {
+      name,
+      key,
+      imageUrl,
+      description,
+      color,
+      accentHex,
+      order,
+      rules,
+    } = req.body;
+
+    if (!name?.trim()) {
+      return res.status(400).json({ message: "Badge name (title) is required." });
+    }
+
+    const cleanName = name.trim();
+    const badgeKey =
+      (key && String(key).trim().toLowerCase().replace(/\s+/g, "-")) ||
+      cleanName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+
+    if (!badgeKey) {
+      return res.status(400).json({ message: "Could not derive a badge key." });
+    }
+
+    let cleanImage = null;
+    if (imageUrl && typeof imageUrl === "string") {
+      const s = imageUrl.trim();
+      const isData = s.startsWith("data:image/");
+      const isLocal =
+        s.startsWith("/") && !s.startsWith("//") && !s.includes("://");
+      if (!isData && !isLocal) {
+        return res.status(400).json({
+          message: "Image must be from computer (data URL) or a local path.",
+        });
+      }
+      if (isData && s.length > 7 * 1024 * 1024) {
+        return res.status(400).json({ message: "Image too large (max ~5 MB)." });
+      }
+      cleanImage = s;
+    }
+
+    const existing = await BadgeDefinition.findOne({ key: badgeKey });
+    if (existing) {
+      return res.status(409).json({ message: "A badge with this key already exists." });
+    }
+
+    const badge = await BadgeDefinition.create({
+      key: badgeKey,
+      name: cleanName,
+      imageUrl: cleanImage,
+      description: description?.trim() || "",
+      color: color || "bg-amber-100 text-amber-600",
+      accentHex: accentHex || "#F7B631",
+      order: typeof order === "number" ? order : 0,
+      rules: {
+        minAttendancePercent: rules?.minAttendancePercent ?? 0,
+        minSoloAvg: rules?.minSoloAvg ?? 0,
+        minAssessmentAvg: rules?.minAssessmentAvg ?? 0,
+        minActivityScore: rules?.minActivityScore ?? 0,
+      },
+    });
+
+    res.status(201).json({
+      message: "Badge created.",
+      badge: {
+        id: badge._id.toString(),
+        key: badge.key,
+        name: badge.name,
+        imageUrl: badge.imageUrl,
+        description: badge.description,
+        order: badge.order,
+        rules: badge.rules,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to create badge." });
+  }
+};
+
+export const adminUpdateBadge = async (req, res) => {
+  try {
+    const { badgeId } = req.params;
+    const badge = await BadgeDefinition.findById(badgeId);
+    if (!badge) {
+      return res.status(404).json({ message: "Badge not found." });
+    }
+
+    const { name, imageUrl, description, color, accentHex, order, rules } =
+      req.body;
+
+    if (name?.trim()) badge.name = name.trim();
+    if (typeof description === "string") badge.description = description.trim();
+    if (color) badge.color = color;
+    if (accentHex) badge.accentHex = accentHex;
+    if (typeof order === "number") badge.order = order;
+
+    if (imageUrl !== undefined) {
+      if (imageUrl === null || imageUrl === "") {
+        badge.imageUrl = null;
+      } else {
+        const s = String(imageUrl).trim();
+        const isData = s.startsWith("data:image/");
+        const isLocal =
+          s.startsWith("/") && !s.startsWith("//") && !s.includes("://");
+        if (!isData && !isLocal) {
+          return res.status(400).json({
+            message: "Image must be from computer or a local path.",
+          });
+        }
+        badge.imageUrl = s;
+      }
+    }
+
+    if (rules && typeof rules === "object") {
+      badge.rules = {
+        minAttendancePercent:
+          rules.minAttendancePercent ?? badge.rules?.minAttendancePercent ?? 0,
+        minSoloAvg: rules.minSoloAvg ?? badge.rules?.minSoloAvg ?? 0,
+        minAssessmentAvg:
+          rules.minAssessmentAvg ?? badge.rules?.minAssessmentAvg ?? 0,
+        minActivityScore:
+          rules.minActivityScore ?? badge.rules?.minActivityScore ?? 0,
+      };
+    }
+
+    await badge.save();
+
+    res.status(200).json({
+      message: "Badge updated.",
+      badge: {
+        id: badge._id.toString(),
+        key: badge.key,
+        name: badge.name,
+        imageUrl: badge.imageUrl,
+        description: badge.description,
+        order: badge.order,
+        rules: badge.rules,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to update badge." });
+  }
+};
+
+export const adminDeleteBadge = async (req, res) => {
+  try {
+    const { badgeId } = req.params;
+    const badge = await BadgeDefinition.findByIdAndDelete(badgeId);
+    if (!badge) {
+      return res.status(404).json({ message: "Badge not found." });
+    }
+    // Optional: remove awards of this badge
+    await StudentBadge.deleteMany({ badgeKey: badge.key });
+    res.status(200).json({ message: "Badge deleted." });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to delete badge." });
   }
 };

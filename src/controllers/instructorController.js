@@ -11,6 +11,7 @@ import StudentProgress from "../models/StudentProgress.js";
 import Segment from "../models/Segment.js";
 import ClassSession from "../models/ClassSession.js";
 import ScheduleEvent from "../models/ScheduleEvent.js";
+import Challenge from "../models/Challenge.js";
 
 /** Resolve cohort by code or ObjectId */
 async function findCohortBySlug(slug) {
@@ -27,10 +28,6 @@ async function findCohortBySlug(slug) {
   return cohort;
 }
 
-/**
- * Canonical set of cohort IDs the current instructor is allowed to see.
- * Sources: User.cohortIds, User.cohortId, Cohort.instructorId
- */
 async function getInstructorCohortIds(instructorId) {
   const instructor = await User.findById(instructorId)
     .select("cohortId cohortIds")
@@ -48,9 +45,7 @@ async function getInstructorCohortIds(instructorId) {
     idSet.add(String(instructor.cohortId));
   }
 
-  const byInstructorField = await Cohort.find({
-    instructorId: instructorId,
-  })
+  const byInstructorField = await Cohort.find({ instructorId })
     .select("_id")
     .lean();
   byInstructorField.forEach((c) => idSet.add(String(c._id)));
@@ -58,18 +53,375 @@ async function getInstructorCohortIds(instructorId) {
   return Array.from(idSet);
 }
 
+function formatDate(d) {
+  if (!d) return "";
+  const date = d instanceof Date ? d : new Date(d);
+  if (Number.isNaN(date.getTime())) return String(d).slice(0, 10);
+  return date.toLocaleDateString("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function formatTime(start, end) {
+  if (start && end) return `${start} - ${end}`;
+  return start || end || "";
+}
+
+function deriveStatus(session, attendanceMarked) {
+  if (
+    session.status === "completed" ||
+    session.completedAt ||
+    attendanceMarked
+  ) {
+    return "completed";
+  }
+  if (session.status === "ongoing") return "ongoing";
+
+  const day = session.date ? new Date(session.date) : null;
+  if (day && !Number.isNaN(day.getTime())) {
+    const start = new Date(day);
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(day);
+    end.setHours(23, 59, 59, 999);
+    const now = Date.now();
+    if (now >= start.getTime() && now <= end.getTime()) return "ongoing";
+  }
+  return session.status || "scheduled";
+}
+
+export const getInstructorSessions = async (req, res) => {
+  try {
+    if (req.role && req.role !== "instructor") {
+      return res.status(403).json({ message: "Instructor access only." });
+    }
+
+    // SAME path as dashboard
+    const cohorts = await loadInstructorCohorts(req.userId);
+    if (!cohorts.length) {
+      return res.status(200).json({ sessions: [] });
+    }
+
+    const cohortOids = cohorts.map((c) => c._id);
+    const cohortIdStrs = cohortOids.map((id) => String(id));
+
+    console.log(
+      "[sessions] cohorts",
+      cohorts.map((c) => ({
+        id: String(c._id),
+        name: c.name,
+        slots: c.scheduleSlots?.length ?? 0,
+        start: c.startDate,
+        end: c.endDate,
+      })),
+    );
+
+    // ── Build ClassSession rows from scheduleSlots (all dates in range) ──
+    for (const c of cohorts) {
+      const lean = c.toObject ? c.toObject() : c;
+      if (!lean.scheduleSlots?.length) continue;
+
+      try {
+        const { expandScheduleSlots } =
+          await import("../utils/scheduleHelpers.js");
+        const expanded = expandScheduleSlots({
+          startDate: lean.startDate,
+          endDate: lean.endDate,
+          scheduleSlots: lean.scheduleSlots,
+        });
+
+        console.log(
+          "[sessions] expanded",
+          lean.name,
+          "→",
+          expanded?.length ?? 0,
+        );
+
+        for (const slot of expanded || []) {
+          const raw = slot.date;
+          const slotDate = raw instanceof Date ? raw : new Date(raw);
+          if (Number.isNaN(slotDate.getTime())) continue;
+
+          const dayStart = new Date(
+            Date.UTC(
+              slotDate.getFullYear(),
+              slotDate.getMonth(),
+              slotDate.getDate(),
+              0,
+              0,
+              0,
+              0,
+            ),
+          );
+
+          const startTime =
+            slot.startTime ||
+            (typeof slot.time === "string"
+              ? slot.time.split("-")[0]?.trim()
+              : "") ||
+            "";
+          const endTime =
+            slot.endTime ||
+            (typeof slot.time === "string"
+              ? slot.time.split("-")[1]?.trim()
+              : "") ||
+            "";
+
+          await ClassSession.findOneAndUpdate(
+            {
+              cohortId: lean._id,
+              date: dayStart,
+              startTime,
+            },
+            {
+              $setOnInsert: {
+                cohortId: lean._id,
+                title: slot.title || "Class",
+                date: dayStart,
+                startTime,
+                endTime,
+                location: slot.location || "",
+                status: "scheduled",
+                attendanceMarked: false,
+              },
+            },
+            { upsert: true, new: true },
+          );
+        }
+      } catch (e) {
+        console.error("[sessions] expand/upsert", lean.name, e);
+      }
+    }
+
+    // ── Optional: ScheduleEvent → ClassSession ──
+    try {
+      const legacy = await ScheduleEvent.find({
+        cohortId: { $in: cohortOids },
+      }).lean();
+
+      for (const ev of legacy) {
+        const slotDate = new Date(ev.date);
+        if (Number.isNaN(slotDate.getTime())) continue;
+        const dayStart = new Date(
+          Date.UTC(
+            slotDate.getFullYear(),
+            slotDate.getMonth(),
+            slotDate.getDate(),
+            0,
+            0,
+            0,
+            0,
+          ),
+        );
+        const startTime =
+          ev.startTime || (ev.time || "").split("-")[0]?.trim() || "";
+        const endTime =
+          ev.endTime || (ev.time || "").split("-")[1]?.trim() || "";
+
+        await ClassSession.findOneAndUpdate(
+          { cohortId: ev.cohortId, date: dayStart, startTime },
+          {
+            $setOnInsert: {
+              cohortId: ev.cohortId,
+              title: ev.title || "Class",
+              date: dayStart,
+              startTime,
+              endTime,
+              location: ev.location || "",
+              status: "scheduled",
+              attendanceMarked: false,
+            },
+          },
+          { upsert: true, new: true },
+        );
+      }
+    } catch {
+      /* optional */
+    }
+
+    // ── Load EVERY ClassSession for these 2 cohorts (past + future) ──
+    const sessions = await ClassSession.find({
+      cohortId: { $in: cohortOids },
+    })
+      .populate({
+        path: "cohortId",
+        select: "name code courseId courseTitle",
+        populate: { path: "courseId", select: "title" },
+      })
+      .sort({ date: -1 })
+      .lean();
+
+    console.log("[sessions] ClassSession count", sessions.length);
+
+    const students = await User.find({
+      role: "student",
+      cohortId: { $in: cohortOids },
+      deletedAt: null,
+    })
+      .select("fullName name avatar cohortId")
+      .lean();
+
+    const byCohort = new Map();
+    for (const st of students) {
+      const key = String(st.cohortId);
+      if (!byCohort.has(key)) byCohort.set(key, []);
+      byCohort.get(key).push(st);
+    }
+
+    const sessionIds = sessions.map((s) => s._id);
+    const attendanceRows =
+      sessionIds.length === 0
+        ? []
+        : await Attendance.find({ sessionId: { $in: sessionIds } }).lean();
+
+    const attBySession = new Map();
+    for (const row of attendanceRows) {
+      const sid = String(row.sessionId);
+      if (!attBySession.has(sid)) attBySession.set(sid, new Map());
+      attBySession.get(sid).set(String(row.studentId), row.status);
+    }
+
+    const payload = sessions.map((session) => {
+      const cohortDoc = session.cohortId;
+      const cohortIdStr = String(cohortDoc?._id || session.cohortId);
+      const roster = byCohort.get(cohortIdStr) || [];
+      const marks = attBySession.get(String(session._id)) || new Map();
+
+      const studentList = roster.map((st) => {
+        const status = marks.get(String(st._id));
+        const isPresent = status === "present" || status === "late";
+        const name = st.fullName || st.name || "Student";
+        const initials = name
+          .split(/\s+/)
+          .map((p) => p[0])
+          .join("")
+          .slice(0, 2)
+          .toUpperCase();
+        return {
+          id: String(st._id),
+          name,
+          avatar: st.avatar || null,
+          avatarInitials: initials || "ST",
+          isPresent,
+          status: status || undefined,
+        };
+      });
+
+      const presentCount = studentList.filter((s) => s.isPresent).length;
+      const attendanceMarked =
+        marks.size > 0 || Boolean(session.attendanceMarked);
+
+      return {
+        id: String(session._id),
+        title: session.title || "Class session",
+        courseName:
+          cohortDoc?.courseId?.title ||
+          cohortDoc?.courseTitle ||
+          cohortDoc?.name ||
+          "Course",
+        date: formatDate(session.date),
+        time: formatTime(session.startTime, session.endTime),
+        status: deriveStatus(session, attendanceMarked),
+        students: studentList,
+        attendanceMarked,
+        presentCount,
+        totalStudents: studentList.length,
+        cohortId: cohortIdStr,
+      };
+    });
+
+    res.status(200).json({ sessions: payload });
+  } catch (err) {
+    console.error("getInstructorSessions", err);
+    res.status(500).json({ message: "Failed to load sessions." });
+  }
+};
+
+export const markSessionAttendance = async (req, res) => {
+  try {
+    if (req.role && req.role !== "instructor") {
+      return res.status(403).json({ message: "Instructor access only." });
+    }
+
+    const { sessionId } = req.params;
+    const { attendance, completeSession } = req.body || {};
+
+    if (!Array.isArray(attendance)) {
+      return res.status(400).json({ message: "attendance array is required." });
+    }
+
+    const cohortIds = await getInstructorCohortIds(req.userId);
+    const session = await ClassSession.findById(sessionId);
+    if (!session) {
+      return res.status(404).json({ message: "Session not found." });
+    }
+
+    if (!cohortIds.includes(String(session.cohortId))) {
+      return res.status(403).json({ message: "Not your cohort." });
+    }
+
+    const allowedStudents = await User.find({
+      role: "student",
+      cohortId: session.cohortId,
+      deletedAt: null,
+    })
+      .select("_id")
+      .lean();
+    const allowedSet = new Set(allowedStudents.map((u) => String(u._id)));
+
+    for (const row of attendance) {
+      const studentId = String(row.studentId || "");
+      if (!allowedSet.has(studentId)) continue;
+
+      const status = row.isPresent ? "present" : "absent";
+
+      await Attendance.findOneAndUpdate(
+        { sessionId: session._id, studentId },
+        {
+          sessionId: session._id,
+          studentId,
+          cohortId: session.cohortId,
+          status,
+          markedBy: req.userId,
+          markedAt: new Date(),
+        },
+        { upsert: true, new: true },
+      );
+    }
+
+    session.attendanceMarked = true;
+    if (completeSession) {
+      session.status = "completed";
+      session.completedAt = new Date();
+    }
+    await session.save();
+
+    res.status(200).json({
+      message: completeSession
+        ? "Attendance saved. Session completed."
+        : "Attendance saved.",
+      sessionId: session._id,
+      status: session.status,
+    });
+  } catch (err) {
+    console.error("markSessionAttendance", err);
+    res.status(500).json({ message: "Failed to save attendance." });
+  }
+};
+
 /** Convenience: load the actual Cohort docs for an instructor */
 async function loadInstructorCohorts(instructorId) {
   const cohortIds = await getInstructorCohortIds(instructorId);
   if (cohortIds.length === 0) return [];
   return Cohort.find({ _id: { $in: cohortIds } })
+    .select(
+      "name code icon startDate endDate scheduleSlots courseId courseTitle courseCategory instructorId",
+    )
     .populate("courseId", "title icon")
     .sort({ startDate: -1 });
 }
 
-/**
- * GET /api/instructor/cohorts
- */
 export const getInstructorCohorts = async (req, res) => {
   try {
     const instructor = await User.findById(req.userId);
@@ -113,9 +465,6 @@ export const getInstructorCohorts = async (req, res) => {
   }
 };
 
-/**
- * GET /api/instructor/cohorts/:slug
- */
 export const getInstructorCohortBySlug = async (req, res) => {
   try {
     const cohort = await findCohortBySlug(req.params.slug);
@@ -1250,7 +1599,6 @@ export const getInstructorSolos = async (req, res) => {
   }
 };
 
-
 export const getInstructorSoloById = async (req, res) => {
   try {
     const { soloId } = req.params;
@@ -1464,9 +1812,7 @@ export const getInstructorSchedule = async (req, res) => {
 
     for (const s of sessions) {
       const key = toDateKey(s.date);
-      const cohort = cohorts.find(
-        (c) => String(c._id) === String(s.cohortId),
-      );
+      const cohort = cohorts.find((c) => String(c._id) === String(s.cohortId));
       const cohortLabel = cohort?.name || cohort?.code || "Cohort";
       const start = s.startTime || "";
       const end = s.endTime || "";
@@ -1499,8 +1845,7 @@ export const getInstructorSchedule = async (req, res) => {
           const key = toDateKey(s.date);
           const start = s.startTime || "";
           const end = s.endTime || "";
-          const time =
-            start && end ? `${start} - ${end}` : start || end || "";
+          const time = start && end ? `${start} - ${end}` : start || end || "";
           pushEvent(key, {
             id: `slot-${c._id}-${i}-${key}`,
             title: `${s.title || "Class"} · ${c.name || c.code}`,
@@ -1532,8 +1877,7 @@ export const getInstructorSchedule = async (req, res) => {
         const cohortLabel = cohort?.name || cohort?.code || "Cohort";
         const start =
           ev.startTime || (ev.time || "").split("-")[0]?.trim() || "";
-        const end =
-          ev.endTime || (ev.time || "").split("-")[1]?.trim() || "";
+        const end = ev.endTime || (ev.time || "").split("-")[1]?.trim() || "";
         const time =
           start && end ? `${start} - ${end}` : start || end || ev.time || "";
 
@@ -1553,14 +1897,120 @@ export const getInstructorSchedule = async (req, res) => {
     }
 
     for (const key of Object.keys(schedule)) {
-      schedule[key].sort((a, b) =>
-        (a.time || "").localeCompare(b.time || ""),
-      );
+      schedule[key].sort((a, b) => (a.time || "").localeCompare(b.time || ""));
     }
 
     res.status(200).json({ schedule });
   } catch (err) {
     console.error("getInstructorSchedule", err);
     res.status(500).json({ message: "Failed to fetch schedule." });
+  }
+};
+
+export const createStudentChallenge = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { title, description, xpReward } = req.body;
+
+    if (!title?.trim() || !description?.trim()) {
+      return res
+        .status(400)
+        .json({ message: "Title and description are required." });
+    }
+
+    const student = await User.findOne({
+      _id: studentId,
+      role: "student",
+      deletedAt: null,
+    }).select("cohortId");
+
+    if (!student || !student.cohortId) {
+      return res.status(404).json({ message: "Student not found." });
+    }
+
+    const allowedIds = await getInstructorCohortIds(req.userId);
+    if (!allowedIds.includes(String(student.cohortId))) {
+      return res
+        .status(403)
+        .json({ message: "Not authorized for this student." });
+    }
+
+    const cohort = await Cohort.findById(student.cohortId)
+      .select("courseId")
+      .lean();
+
+    const instructor = await User.findById(req.userId).select("avatar").lean();
+
+    const challenge = await Challenge.create({
+      title: title.trim(),
+      description: description.trim(),
+      xpReward: typeof xpReward === "number" && xpReward > 0 ? xpReward : 100,
+      avatar: instructor?.avatar || "/default.jpg",
+      cohortId: student.cohortId,
+      courseId: cohort?.courseId || undefined,
+      studentId: student._id, // targeted to this student only
+      instructorId: req.userId,
+      isActive: true,
+    });
+
+    res.status(201).json({
+      id: challenge._id.toString(),
+      title: challenge.title,
+      description: challenge.description,
+      xpReward: challenge.xpReward,
+      createdAt: challenge.createdAt,
+    });
+  } catch (err) {
+    console.error("createStudentChallenge", err);
+    res.status(500).json({ message: "Failed to create challenge." });
+  }
+};
+
+/**
+ * GET /api/instructor/students/:studentId/challenges
+ * Challenges dropped for this student only (instructor’s cohorts).
+ */
+export const getStudentChallengesForInstructor = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+
+    const student = await User.findOne({
+      _id: studentId,
+      role: "student",
+      deletedAt: null,
+    }).select("cohortId");
+
+    if (!student || !student.cohortId) {
+      return res.status(404).json({ message: "Student not found." });
+    }
+
+    const allowedIds = await getInstructorCohortIds(req.userId);
+    if (!allowedIds.includes(String(student.cohortId))) {
+      return res
+        .status(403)
+        .json({ message: "Not authorized for this student." });
+    }
+
+    const list = await Challenge.find({
+      studentId: student._id,
+      isActive: true,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.status(200).json({
+      challenges: list.map((c) => ({
+        id: c._id.toString(),
+        title: c.title,
+        description: c.description,
+        xpReward: c.xpReward,
+        avatar: c.avatar || "/default.jpg",
+        createdAt: c.createdAt,
+        status: "open",
+      })),
+    });
+  } catch (err) {
+    console.error("getStudentChallengesForInstructor", err);
+    res.status(500).json({ message: "Failed to load challenges." });
   }
 };

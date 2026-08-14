@@ -44,7 +44,11 @@ import {
   updateAssessment,
   repairCohortInstructorLinks,
   deleteUser,
-  getDeletedUsers
+  getDeletedUsers,
+  adminListBadges,
+  adminCreateBadge,
+  adminUpdateBadge,
+  adminDeleteBadge
 } from "../controllers/adminController.js";
 import { requireAdmin } from "../middleware/adminAuth.js";
 import { Router } from "express";
@@ -125,5 +129,10 @@ router.put("/graduation-settings", updateGraduationSettings);
 router.get("/students/:studentId/eligibility", evaluateGraduationEligibility);
 router.post("/students/:studentId/graduate", graduateStudent);
 
+// adminRoutes.js — behind requireAdmin
+router.get("/badges", adminListBadges);
+router.post("/badges", adminCreateBadge);
+router.patch("/badges/:badgeId", adminUpdateBadge);
+router.delete("/badges/:badgeId", adminDeleteBadge);
 
 export default router;
