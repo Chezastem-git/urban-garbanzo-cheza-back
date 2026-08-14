@@ -296,7 +296,7 @@ export const getStudentDashboard = async (req, res) => {
       student: {
         id: user._id,
         name: user.name || user.fullName || "Student",
-        avatar: user.avatar || "/temp-student-asset/joan.jpg",
+        avatar: user.avatar || "/default.jpg",
         cohortName: user.cohortId?.name || "—",
       },
       course: {

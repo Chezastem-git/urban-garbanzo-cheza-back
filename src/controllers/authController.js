@@ -130,7 +130,7 @@ export const getMyProfile = async (req, res) => {
     const defaultAvatar =
       user.role === "instructor"
         ? "/default.jpg"
-        : "/temp-student-asset/joan.jpg"; // or a neutral icon path you prefer
+        : "/default.jpg"; // or a neutral icon path you prefer
 
     res.status(200).json({
       id: user._id,
