@@ -66,7 +66,7 @@ const assessmentSchema = new mongoose.Schema(
     durationMinutes: { type: Number, default: 15 },
     order: { type: Number, default: 0 },
     // Student-facing only; admin UI ignores this
-    isLocked: { type: Boolean, default: true },
+    isLocked: { type: Boolean, default: false },
     questions: [questionSchema],
     attempts: [attemptSchema],
   },

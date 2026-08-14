@@ -88,17 +88,13 @@ function idSet(ids = []) {
   return new Set(ids.map((id) => String(id)));
 }
 
-
 function assertSameCourse(resourceCourseId, studentCourseId) {
   if (!resourceCourseId || !studentCourseId) return false;
   return String(resourceCourseId) === String(studentCourseId);
 }
 
-
-
 export const clearStudentNotifications = async (req, res) => {
   try {
-    
     await Notification.updateMany(
       { studentId: req.userId, isRead: false },
       { $set: { isRead: true } },
@@ -496,12 +492,8 @@ export const getStudentAssessments = async (req, res) => {
         (att) => String(att.studentId) === studentIdStr,
       );
 
-      let status = "locked";
-      if (!a.isLocked) {
-        status = attempt?.status === "completed" ? "completed" : "unlocked";
-      } else if (attempt?.status === "completed") {
-        status = "completed";
-      }
+      // Always unlocked unless the student has already completed it
+      const status = attempt?.status === "completed" ? "completed" : "unlocked";
 
       return {
         _id: a._id,
@@ -509,7 +501,7 @@ export const getStudentAssessments = async (req, res) => {
         description: a.description,
         durationMinutes: a.durationMinutes,
         questionsCount: a.questions?.length || 0,
-        isLocked: a.isLocked,
+        isLocked: false, // students can take any assessment at any time
         status,
         completionPercentage:
           attempt?.status === "completed" ? attempt.scorePercentage : undefined,
@@ -593,7 +585,7 @@ export const getStudentAssessmentById = async (req, res) => {
       title: assessment.title,
       description: assessment.description,
       durationMinutes: assessment.durationMinutes,
-      isLocked: assessment.isLocked,
+      isLocked: false, // always unlocked
       questions,
       myAttempt: attempt || null,
     });
@@ -626,10 +618,6 @@ export const submitAssessment = async (req, res) => {
     // Isolation: cannot submit an assessment from another course
     if (!assertSameCourse(assessment.courseId, ctx.courseId)) {
       return res.status(403).json({ message: "Not allowed." });
-    }
-
-    if (assessment.isLocked) {
-      return res.status(403).json({ message: "Assessment is locked." });
     }
 
     const questions = assessment.questions || [];
@@ -736,7 +724,6 @@ export const submitAssessment = async (req, res) => {
     res.status(500).json({ message: "Failed to submit assessment." });
   }
 };
-
 // ── Attendance ───────────────────────────────────────────────────────────────
 
 export const getStudentAttendance = async (req, res) => {
@@ -929,7 +916,6 @@ export const getStudentChallenges = async (req, res) => {
   }
 };
 
-
 export const getStudentDashboard = async (req, res) => {
   try {
     const ctx = await getStudentContext(req.userId);
@@ -940,31 +926,48 @@ export const getStudentDashboard = async (req, res) => {
     const { user, cohort, course, courseId } = ctx;
 
     let courseProgress = 0;
-    if (courseId) {
-      const progress = await getOrCreateProgress(req.userId, courseId);
-      const completedSet = idSet(progress.completedSegmentIds);
-      const milestones = await Milestone.find({ courseId }).sort({ order: 1 });
-      const milestoneIds = milestones.map((m) => m._id);
-      const segments = await Segment.find({
-        milestoneId: { $in: milestoneIds },
-      }).select("milestoneId _id");
 
-      let completedMilestones = 0;
-      for (const m of milestones) {
-        const segs = segments.filter(
-          (s) => String(s.milestoneId) === String(m._id),
-        );
-        if (
-          segs.length > 0 &&
-          segs.every((s) => completedSet.has(String(s._id)))
-        ) {
-          completedMilestones += 1;
+    if (courseId) {
+      // Run independent queries in parallel
+      const [progress, milestones] = await Promise.all([
+        getOrCreateProgress(req.userId, courseId),
+        Milestone.find({ courseId }).select("_id").sort({ order: 1 }).lean(),
+      ]);
+
+      if (milestones.length > 0) {
+        const milestoneIds = milestones.map((m) => m._id);
+
+        const segments = await Segment.find({
+          milestoneId: { $in: milestoneIds },
+        })
+          .select("milestoneId _id")
+          .lean();
+
+        const completedSet = idSet(progress.completedSegmentIds);
+
+        // Group segments by milestone once
+        const segsByMilestone = new Map();
+        for (const s of segments) {
+          const key = String(s.milestoneId);
+          if (!segsByMilestone.has(key)) segsByMilestone.set(key, []);
+          segsByMilestone.get(key).push(s);
         }
+
+        let completedMilestones = 0;
+        for (const m of milestones) {
+          const segs = segsByMilestone.get(String(m._id)) || [];
+          if (
+            segs.length > 0 &&
+            segs.every((s) => completedSet.has(String(s._id)))
+          ) {
+            completedMilestones += 1;
+          }
+        }
+
+        courseProgress = Math.round(
+          (completedMilestones / milestones.length) * 100,
+        );
       }
-      courseProgress =
-        milestones.length > 0
-          ? Math.round((completedMilestones / milestones.length) * 100)
-          : 0;
     }
 
     res.status(200).json({
@@ -985,9 +988,6 @@ export const getStudentDashboard = async (req, res) => {
     res.status(500).json({ message: "Error loading dashboard." });
   }
 };
-
-
-
 export const getStudentSchedule = async (req, res) => {
   try {
     const ctx = await getStudentContext(req.userId);
@@ -1186,7 +1186,6 @@ export const getStudentMilestoneById = async (req, res) => {
     if (!milestone) {
       return res.status(404).json({ message: "Milestone not found." });
     }
-
 
     if (!assertSameCourse(milestone.courseId, ctx.courseId)) {
       return res.status(403).json({ message: "Not allowed." });
@@ -1501,7 +1500,6 @@ export async function evaluateAndAwardBadges(userId) {
       });
       newlyAwarded.push(def.key);
     } catch (e) {
-      
       if (e?.code !== 11000) throw e;
     }
   }
