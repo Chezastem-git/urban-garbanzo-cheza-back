@@ -11,11 +11,7 @@ export function toDisplayTime(hhmm) {
   return `${h}:${mStr.padStart(2, "0")} ${ampm}`;
 }
 
-/**
- * Expand weekly slots into concrete class days.
- * dayOfWeek: 0 = Sunday … 6 = Saturday (same as Date#getDay()).
- * Returns objects matching your ClassSession fields: date, startTime, endTime, title
- */
+
 export function expandScheduleSlots({
   startDate,
   endDate,
