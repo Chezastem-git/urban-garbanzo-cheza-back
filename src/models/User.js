@@ -61,6 +61,20 @@ const UserSchema = new mongoose.Schema(
       default: null,
     },
 
+    // ── Force password change on first login ─────────────────
+    mustChangePassword: {
+      type: Boolean,
+      default: true, // every new user must change password the first time
+    },
+    isFirstLogin: {
+      type: Boolean,
+      default: true,
+    },
+    passwordChanged: {
+      type: Boolean,
+      default: false,
+    },
+
     // ── Soft delete / audit ─────────────────────────────────
     deletedAt: {
       type: Date,

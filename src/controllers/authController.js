@@ -4,6 +4,17 @@ import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import Cohort from "../models/Cohort.js"; // only needed if you validate cohort code
 
+// ── Helper: decide whether the user must change password ─────────────
+function needsPasswordChange(user) {
+  // Prefer an explicit flag. Fallbacks for older records.
+  if (typeof user.mustChangePassword === "boolean") {
+    return user.mustChangePassword;
+  }
+  if (user.isFirstLogin === true) return true;
+  if (user.passwordChanged === false) return true;
+  return false;
+}
+
 export const login = async (req, res) => {
   try {
     const { email, password, role, cohort } = req.body;
@@ -55,16 +66,13 @@ export const login = async (req, res) => {
     }
 
     // --- Student-only: optional cohort check ---
-    // Keep this if your product still requires cohort on student login.
     if (user.role === "student" && cohort) {
       const cohortCode = cohort.trim().toLowerCase();
       const userCohortCode =
         user.cohortId?.code?.toLowerCase?.() ||
         user.cohortId?.name?.toLowerCase?.();
 
-      // If the user has a cohort and the provided code doesn't match, reject
       if (user.cohortId && userCohortCode && userCohortCode !== cohortCode) {
-        // Also try matching by name with hyphens → spaces
         const normalizedInput = cohortCode.replace(/-/g, " ");
         const normalizedName = (user.cohortId.name || "").toLowerCase();
 
@@ -86,6 +94,8 @@ export const login = async (req, res) => {
       { expiresIn: "7d" },
     );
 
+    const mustChange = needsPasswordChange(user);
+
     return res.status(200).json({
       token,
       user: {
@@ -95,6 +105,8 @@ export const login = async (req, res) => {
         role: user.role, // "student" | "instructor"
         status: user.status,
         cohort: user.cohortId,
+        mustChangePassword: mustChange, // ← NEW
+        avatar: user.avatar || "/default.jpg",
       },
     });
   } catch (error) {
@@ -127,10 +139,7 @@ export const getMyProfile = async (req, res) => {
       return res.status(403).json({ message: "Forbidden." });
     }
 
-    const defaultAvatar =
-      user.role === "instructor"
-        ? "/default.jpg"
-        : "/default.jpg"; // or a neutral icon path you prefer
+    const defaultAvatar = "/default.jpg";
 
     res.status(200).json({
       id: user._id,
@@ -139,13 +148,14 @@ export const getMyProfile = async (req, res) => {
       role: user.role,
       status: user.status,
       avatar: user.avatar || defaultAvatar,
+      mustChangePassword: needsPasswordChange(user), // ← NEW (Navbar reads this)
       cohort: user.cohortId
         ? {
             id: user.cohortId._id,
             name: user.cohortId.name,
             code: user.cohortId.code,
             startDate: user.cohortId.startDate,
-            endDate: user.cohortId.endDate, // exact date, unedited
+            endDate: user.cohortId.endDate,
             courseTitle: user.cohortId.courseId?.title || null,
             courseCategory: user.cohortId.courseId?.category || null,
           }
@@ -188,10 +198,20 @@ export const changeMyPassword = async (req, res) => {
         .json({ message: "Current password is incorrect." });
     }
 
+    // Update password
     user.passwordHash = await bcrypt.hash(newPassword, 10);
+
+    // Clear the force-change flags
+    user.mustChangePassword = false;
+    user.isFirstLogin = false;
+    user.passwordChanged = true;
+
     await user.save();
 
-    res.status(200).json({ message: "Password updated successfully." });
+    res.status(200).json({
+      message: "Password updated successfully.",
+      mustChangePassword: false,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to change password." });
