@@ -20,6 +20,8 @@ import {
   getStudentSegmentById,
   completeStudentSegment,
   getStudentSoloById,
+  updateStudentIdPhoto, 
+  // setStudentAdmissionNumber, 
 } from "../controllers/studentController.js";
 
 const router = Router();
@@ -55,5 +57,9 @@ router.get("/schedule", getStudentSchedule);
 router.get("/challenges", getStudentChallenges);
 router.get("/attendance", getStudentAttendance);
 router.get("/badges", getStudentBadges);
+
+// ── Student ID card ──────────────────────────────────────────
+router.patch("/id-photo", updateStudentIdPhoto);
+// router.patch("/admission-number", setStudentAdmissionNumber);
 
 export default router;

@@ -148,7 +148,9 @@ export const getMyProfile = async (req, res) => {
       role: user.role,
       status: user.status,
       avatar: user.avatar || defaultAvatar,
-      mustChangePassword: needsPasswordChange(user), // ← NEW (Navbar reads this)
+      mustChangePassword: needsPasswordChange(user),
+      idPhoto: user.idPhoto || null,
+      admissionNumber: user.admissionNumber || null, 
       cohort: user.cohortId
         ? {
             id: user.cohortId._id,

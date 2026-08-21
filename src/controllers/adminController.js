@@ -1958,10 +1958,7 @@ export const getClassSessionById = async (req, res) => {
     // If you don't have Attendance model yet:
     res.status(200).json({ session, attendance: [] });
 
-    // When Attendance exists:
-    // const attendance = await Attendance.find({ classSessionId: session._id })
-    //   .populate("studentId", "fullName email");
-    // res.status(200).json({ session, attendance });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to fetch session." });
@@ -2157,11 +2154,6 @@ export const adminListBadges = async (req, res) => {
   }
 };
 
-/**
- * POST /api/admin/badges
- * body: { name, key?, imageUrl, description?, color?, accentHex?, order?, rules? }
- * imageUrl: data:image/... from computer OR /path under public
- */
 export const adminCreateBadge = async (req, res) => {
   try {
     const { name, key, imageUrl, description, color, accentHex, order, rules } =

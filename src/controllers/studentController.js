@@ -12,6 +12,7 @@ import Challenge from "../models/Challenge.js";
 import { BadgeDefinition, StudentBadge } from "../models/Badge.js";
 import Attendance from "../models/Attendance.js";
 import Segment from "../models/Segment.js";
+import { generateUniqueAdmissionNumber } from "../utils/admissionNumber.js";
 
 function toDateKey(value) {
   if (!value) return null;
@@ -1506,3 +1507,127 @@ export async function evaluateAndAwardBadges(userId) {
 
   return newlyAwarded;
 }
+
+/** Generate a unique admission number: CHEZA-YYYY-XXXXXX */
+// async function generateUniqueAdmissionNumber() {
+//   const year = new Date().getFullYear();
+//   for (let attempt = 0; attempt < 20; attempt++) {
+//     const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
+//     const candidate = `CHEZA-${year}-${suffix}`;
+//     const exists = await User.findOne({ admissionNumber: candidate }).select(
+//       "_id",
+//     );
+//     if (!exists) return candidate;
+//   }
+//   // Fallback with timestamp
+//   return `CHEZA-${year}-${Date.now().toString(36).toUpperCase()}`;
+// }
+
+export const updateStudentIdPhoto = async (req, res) => {
+  try {
+    const { idPhoto } = req.body;
+
+    if (!idPhoto || typeof idPhoto !== "string" || idPhoto.trim().length < 3) {
+      return res.status(400).json({ message: "A valid image is required." });
+    }
+
+    const clean = idPhoto.trim();
+    const isDataUrl = clean.startsWith("data:image/");
+    const isLocalPath =
+      clean.startsWith("/") &&
+      !clean.startsWith("//") &&
+      !clean.includes("://");
+
+    if (!isDataUrl && !isLocalPath) {
+      return res.status(400).json({
+        message:
+          "Only images from your computer are allowed. External URLs are not accepted.",
+      });
+    }
+
+    if (isDataUrl && clean.length > 2.2 * 1024 * 1024) {
+      return res
+        .status(400)
+        .json({ message: "Image too large. Max about 1.5 MB." });
+    }
+
+    const user = await User.findById(req.userId);
+    if (!user || user.deletedAt) {
+      return res.status(404).json({ message: "User not found." });
+    }
+    if (user.role !== "student") {
+      return res.status(403).json({ message: "Not a student account." });
+    }
+
+    // Generate admission number only the first time
+    if (!user.admissionNumber) {
+      user.admissionNumber = await generateUniqueAdmissionNumber();
+      user.admissionNumberSetAt = new Date();
+    }
+
+    // Always allow updating the photo
+    user.idPhoto = clean;
+    await user.save();
+
+    return res.status(200).json({
+      message: user.admissionNumberSetAt
+        ? "Official ID photo updated."
+        : "Official ID photo saved and admission number assigned.",
+      idPhoto: user.idPhoto,
+      admissionNumber: user.admissionNumber,
+    });
+  } catch (err) {
+    console.error(err);
+    if (err.code === 11000) {
+      return res
+        .status(409)
+        .json({ message: "Admission number conflict. Please try again." });
+    }
+    return res.status(500).json({ message: "Failed to update ID photo." });
+  }
+};
+
+export const updateIdPhoto = async (req, res) => {
+  try {
+    const student = await User.findById(req.userId); // or whatever your auth middleware sets
+    if (!student || student.role !== "student") {
+      return res.status(404).json({ message: "Student not found." });
+    }
+
+    const { idPhoto } = req.body;
+    if (
+      !idPhoto ||
+      typeof idPhoto !== "string" ||
+      !idPhoto.startsWith("data:image/")
+    ) {
+      return res
+        .status(400)
+        .json({ message: "Valid image data URL required." });
+    }
+
+    if (idPhoto.length > 7 * 1024 * 1024) {
+      return res.status(400).json({ message: "Image too large (max ~5 MB)." });
+    }
+
+    if (!student.admissionNumber) {
+      student.admissionNumber = await generateUniqueAdmissionNumber();
+    }
+
+    student.idPhoto = idPhoto; // overwrite is allowed
+    await student.save();
+
+    res.status(200).json({
+      message: "Official ID photo updated.",
+      idPhoto: student.idPhoto,
+      admissionNumber: student.admissionNumber,
+    });
+  } catch (err) {
+    console.error(err);
+    if (err.code === 11000) {
+      return res
+        .status(409)
+        .json({ message: "Admission number conflict. Please try again." });
+    }
+    res.status(500).json({ message: "Failed to update ID photo." });
+  }
+};

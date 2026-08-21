@@ -3,7 +3,7 @@ import mongoose from "mongoose";
 
 const certificateSchema = new mongoose.Schema(
   {
-    // Who received the certificate
+ 
     studentId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -11,7 +11,6 @@ const certificateSchema = new mongoose.Schema(
       index: true,
     },
 
-    // Which cohort / program
     cohortId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Cohort",
@@ -19,7 +18,6 @@ const certificateSchema = new mongoose.Schema(
       index: true,
     },
 
-    // Unique certificate identifier
     certificateNumber: {
       type: String,
       required: true,
@@ -27,7 +25,6 @@ const certificateSchema = new mongoose.Schema(
       trim: true,
     },
 
-    // Snapshot of data at the time of issuance (so it never changes later)
     studentName: {
       type: String,
       required: true,
@@ -44,7 +41,6 @@ const certificateSchema = new mongoose.Schema(
       trim: true,
     },
 
-    // Final metrics recorded at graduation
     metrics: {
       progress: { type: Number, default: 0 },
       attendancePct: { type: Number, default: 0 },
@@ -54,26 +50,22 @@ const certificateSchema = new mongoose.Schema(
     },
     forceGraduated: { type: Boolean, default: false },
 
-    // When it was issued
     issuedAt: {
       type: Date,
       default: Date.now,
     },
 
-    // Which admin issued it
     issuedByAdminId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Admin",
       required: true,
     },
 
-    // Optional: link to a generated PDF later
     pdfUrl: {
       type: String,
       default: null,
     },
 
-    // Can be revoked if needed
     status: {
       type: String,
       enum: ["issued", "revoked"],
@@ -83,7 +75,6 @@ const certificateSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// Prevent a student from getting multiple certificates for the same cohort
 certificateSchema.index({ studentId: 1, cohortId: 1 }, { unique: true });
 
 const Certificate =

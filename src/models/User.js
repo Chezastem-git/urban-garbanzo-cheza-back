@@ -61,10 +61,30 @@ const UserSchema = new mongoose.Schema(
       default: null,
     },
 
+    // ── Student ID card ──────────────────────────────────────
+    /** Official photo for the physical/digital ID card (set once only) */
+    idPhoto: {
+      type: String,
+      default: null,
+    },
+    /** Student-generated unique admission / student ID number */
+    admissionNumber: {
+      type: String,
+      unique: true,
+      sparse: true, // allows multiple nulls until student sets it
+      trim: true,
+      uppercase: true,
+    },
+    /** When the student first set their admission number */
+    admissionNumberSetAt: {
+      type: Date,
+      default: null,
+    },
+
     // ── Force password change on first login ─────────────────
     mustChangePassword: {
       type: Boolean,
-      default: true, // every new user must change password the first time
+      default: true,
     },
     isFirstLogin: {
       type: Boolean,
@@ -86,7 +106,6 @@ const UserSchema = new mongoose.Schema(
       ref: "Admin",
       default: null,
     },
-    // Snapshot of identity at deletion (email is rewritten so unique holds)
     deletedEmail: {
       type: String,
       default: null,
