@@ -8,6 +8,7 @@ import adminRoutes from "./src/routes/adminRoutes.js";
 import authRoutes from "./src/routes/authRoutes.js";
 import studentRoutes from "./src/routes/studentRoutes.js";
 import instructorRoutes from "./src/routes/instructorRoutes.js";
+import publicRoutes from "./src/routes/publicRoutes.js";
 
 import dns from "node:dns";
 dns.setServers(["1.1.1.1", "8.8.8.8"]);
@@ -29,6 +30,8 @@ app.use("/api/auth", authRoutes);
 
 app.use("/api/student", studentRoutes);
 app.use("/api/instructor", instructorRoutes);
+
+app.use("/api/public", publicRoutes)
 
 app.get("/api/health", (_req, res) => {
   res
