@@ -4,6 +4,7 @@ import Cohort from "../models/Cohort.js";
 import ClassSession from "../models/ClassSession.js";
 import Attendance from "../models/Attendance.js";
 import ScheduleEvent from "../models/ScheduleEvent.js";
+import RecordedSession from "../models/RecordedSession.js"
 
 async function getInstructorCohortIds(instructorId) {
   const instructor = await User.findById(instructorId)
@@ -301,10 +302,23 @@ export const getInstructorSessions = async (req, res) => {
 /**
  * POST /api/instructor/sessions/:sessionId/attendance
  */
+/**
+ * POST /api/instructor/sessions/:sessionId/attendance
+ */
 export const markSessionAttendance = async (req, res) => {
   try {
     const { sessionId } = req.params;
-    const { attendance = [], completeSession = true } = req.body || {};
+    const {
+      attendance = [],
+      completeSession = true,
+      videoUrl,
+      meetUrl,
+      embedUrl,
+      thumbnail,
+      duration,
+      topics,
+      milestoneTitle,
+    } = req.body || {};
 
     const session = await ClassSession.findById(sessionId);
     if (!session) {
@@ -344,13 +358,46 @@ export const markSessionAttendance = async (req, res) => {
     }
 
     session.attendanceMarked = true;
-    if (completeSession) session.status = "completed";
+    if (completeSession) {
+      session.status = "completed";
+      session.completedAt = new Date();
+    }
     await session.save();
 
+    // Create RecordedSession only when a URL is provided
+    let recorded = null;
+    if (completeSession && videoUrl?.trim()) {
+      const instructor = await User.findById(req.userId)
+        .select("fullName name avatar")
+        .lean();
+
+      recorded = await RecordedSession.create({
+        title: session.title || "Class Recording",
+        description: `Recording for ${session.title || "class"} on ${formatDate(session.date)}`,
+        videoUrl: videoUrl.trim(),
+        meetUrl: meetUrl?.trim() || videoUrl.trim(),
+        embedUrl: embedUrl?.trim() || undefined,
+        thumbnail: thumbnail?.trim() || undefined,
+        duration: duration?.trim() || undefined,
+        topics: Array.isArray(topics) ? topics.filter(Boolean) : [],
+        milestoneTitle: milestoneTitle?.trim() || undefined,
+        instructorName:
+          instructor?.fullName || instructor?.name || "Instructor",
+        instructorAvatar: instructor?.avatar || "/default.jpg",
+        cohortId: session.cohortId,
+        date: session.date || new Date(),
+        uploadedBy: req.userId,
+      });
+    }
+
     res.status(200).json({
-      message: "Attendance saved.",
+      message: completeSession
+        ? "Attendance saved. Session completed."
+        : "Attendance saved.",
       attendanceMarked: true,
       status: session.status,
+      sessionId: session._id,
+      recordedSessionId: recorded?._id || null,
     });
   } catch (err) {
     console.error("markSessionAttendance", err);

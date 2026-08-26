@@ -91,36 +91,36 @@ function deriveStatus(session, attendanceMarked) {
   return session.status || "scheduled";
 }
 
+function toUtcMidnight(d) {
+  const date = d instanceof Date ? d : new Date(d);
+  if (Number.isNaN(date.getTime())) return null;
+  return new Date(
+    Date.UTC(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0),
+  );
+}
+
 export const getInstructorSessions = async (req, res) => {
   try {
     if (req.role && req.role !== "instructor") {
       return res.status(403).json({ message: "Instructor access only." });
     }
 
-    // SAME path as dashboard
     const cohorts = await loadInstructorCohorts(req.userId);
     if (!cohorts.length) {
       return res.status(200).json({ sessions: [] });
     }
 
     const cohortOids = cohorts.map((c) => c._id);
-    const cohortIdStrs = cohortOids.map((id) => String(id));
 
-    console.log(
-      "[sessions] cohorts",
-      cohorts.map((c) => ({
-        id: String(c._id),
-        name: c.name,
-        slots: c.scheduleSlots?.length ?? 0,
-        start: c.startDate,
-        end: c.endDate,
-      })),
-    );
-
-    // ── Build ClassSession rows from scheduleSlots (all dates in range) ──
+    // ── Expand scheduleSlots ONLY if no ClassSessions exist yet for that cohort
     for (const c of cohorts) {
       const lean = c.toObject ? c.toObject() : c;
       if (!lean.scheduleSlots?.length) continue;
+
+      const existingCount = await ClassSession.countDocuments({
+        cohortId: lean._id,
+      });
+      if (existingCount > 0) continue; // already materialised – do not re-expand
 
       try {
         const { expandScheduleSlots } =
@@ -131,29 +131,9 @@ export const getInstructorSessions = async (req, res) => {
           scheduleSlots: lean.scheduleSlots,
         });
 
-        console.log(
-          "[sessions] expanded",
-          lean.name,
-          "→",
-          expanded?.length ?? 0,
-        );
-
         for (const slot of expanded || []) {
-          const raw = slot.date;
-          const slotDate = raw instanceof Date ? raw : new Date(raw);
-          if (Number.isNaN(slotDate.getTime())) continue;
-
-          const dayStart = new Date(
-            Date.UTC(
-              slotDate.getFullYear(),
-              slotDate.getMonth(),
-              slotDate.getDate(),
-              0,
-              0,
-              0,
-              0,
-            ),
-          );
+          const dayStart = toUtcMidnight(slot.date);
+          if (!dayStart) continue;
 
           const startTime =
             slot.startTime ||
@@ -194,26 +174,15 @@ export const getInstructorSessions = async (req, res) => {
       }
     }
 
-    // ── Optional: ScheduleEvent → ClassSession ──
+    // ── Optional legacy ScheduleEvent → ClassSession (same unique key)
     try {
       const legacy = await ScheduleEvent.find({
         cohortId: { $in: cohortOids },
       }).lean();
 
       for (const ev of legacy) {
-        const slotDate = new Date(ev.date);
-        if (Number.isNaN(slotDate.getTime())) continue;
-        const dayStart = new Date(
-          Date.UTC(
-            slotDate.getFullYear(),
-            slotDate.getMonth(),
-            slotDate.getDate(),
-            0,
-            0,
-            0,
-            0,
-          ),
-        );
+        const dayStart = toUtcMidnight(ev.date);
+        if (!dayStart) continue;
         const startTime =
           ev.startTime || (ev.time || "").split("-")[0]?.trim() || "";
         const endTime =
@@ -240,7 +209,7 @@ export const getInstructorSessions = async (req, res) => {
       /* optional */
     }
 
-    // ── Load EVERY ClassSession for these 2 cohorts (past + future) ──
+    // ── Load sessions (now unique)
     const sessions = await ClassSession.find({
       cohortId: { $in: cohortOids },
     })
@@ -252,7 +221,9 @@ export const getInstructorSessions = async (req, res) => {
       .sort({ date: -1 })
       .lean();
 
-    console.log("[sessions] ClassSession count", sessions.length);
+    // … rest of the function stays exactly the same
+    // (students, attendance maps, payload building, res.json)
+    // ───────────────────────────────────────────────────────────────
 
     const students = await User.find({
       role: "student",
@@ -320,6 +291,7 @@ export const getInstructorSessions = async (req, res) => {
           cohortDoc?.courseTitle ||
           cohortDoc?.name ||
           "Course",
+        cohortName: cohortDoc?.name || "",
         date: formatDate(session.date),
         time: formatTime(session.startTime, session.endTime),
         status: deriveStatus(session, attendanceMarked),
@@ -345,11 +317,28 @@ export const markSessionAttendance = async (req, res) => {
     }
 
     const { sessionId } = req.params;
-    const { attendance, completeSession } = req.body || {};
+    const {
+      attendance,
+      completeSession,
+      videoUrl, // required when completeSession === true
+      meetUrl,
+      embedUrl,
+      thumbnail,
+      duration,
+      topics,
+      milestoneTitle,
+    } = req.body || {};
 
     if (!Array.isArray(attendance)) {
       return res.status(400).json({ message: "attendance array is required." });
     }
+
+    // if (completeSession && !videoUrl?.trim()) {
+    //   return res.status(400).json({
+    //     message:
+    //       "A recording / video URL is required when completing the session.",
+    //   });
+    // }
 
     const cohortIds = await getInstructorCohortIds(req.userId);
     const session = await ClassSession.findById(sessionId);
@@ -397,12 +386,39 @@ export const markSessionAttendance = async (req, res) => {
     }
     await session.save();
 
+    // Create RecordedSession ONLY if a URL was provided
+    let recorded = null;
+    if (completeSession && videoUrl?.trim()) {
+      const instructor = await User.findById(req.userId)
+        .select("fullName name avatar")
+        .lean();
+
+      recorded = await RecordedSession.create({
+        title: session.title || "Class Recording",
+        description: `Recording for ${session.title || "class"} on ${formatDate(session.date)}`,
+        videoUrl: videoUrl.trim(),
+        meetUrl: meetUrl?.trim() || videoUrl.trim(),
+        embedUrl: embedUrl?.trim() || undefined,
+        thumbnail: thumbnail?.trim() || undefined,
+        duration: duration?.trim() || undefined,
+        topics: Array.isArray(topics) ? topics : [],
+        milestoneTitle: milestoneTitle?.trim() || undefined,
+        instructorName:
+          instructor?.fullName || instructor?.name || "Instructor",
+        instructorAvatar: instructor?.avatar || "/default.jpg",
+        cohortId: session.cohortId,
+        date: session.date,
+        uploadedBy: req.userId,
+      });
+    }
+
     res.status(200).json({
       message: completeSession
         ? "Attendance saved. Session completed."
         : "Attendance saved.",
       sessionId: session._id,
       status: session.status,
+      recordedSessionId: recorded?._id || null,
     });
   } catch (err) {
     console.error("markSessionAttendance", err);
