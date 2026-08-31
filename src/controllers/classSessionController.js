@@ -44,8 +44,22 @@ function formatDate(d) {
 }
 
 function formatTime(start, end) {
-  const a = toDisplayTime(start);
-  const b = toDisplayTime(end);
+  const label = (t) => {
+    if (!t) return "";
+    const raw = String(t).trim();
+    if (/AM|PM/i.test(raw)) return raw;
+    const m = raw.match(/^(\d{1,2}):(\d{2})/);
+    if (!m) return raw;
+    let h = Number(m[1]);
+    const min = m[2];
+    const ampm = h >= 12 ? "PM" : "AM";
+    h = h % 12;
+    if (h === 0) h = 12;
+    return `${h}:${min} ${ampm}`;
+  };
+
+  const a = label(start);
+  const b = label(end);
   if (a && b) return `${a} - ${b}`;
   return a || "—";
 }
@@ -139,13 +153,10 @@ function displayStatusFor(session, attendanceMarked) {
   return "upcoming";
 }
 
-/**
- * GET /api/instructor/sessions
- */
 export const getInstructorSessions = async (req, res) => {
   try {
     const cohortIdStrs = await getInstructorCohortIds(req.userId);
-    if (cohortIdStrs.length === 0) {
+    if (!cohortIdStrs.length) {
       return res.status(200).json({ sessions: [] });
     }
 
@@ -158,111 +169,9 @@ export const getInstructorSessions = async (req, res) => {
     windowEnd.setHours(23, 59, 59, 999);
 
     const cohorts = await Cohort.find({ _id: { $in: cohortIdStrs } })
-      .select("name code courseTitle courseId startDate endDate scheduleSlots")
+      .select("name code courseTitle courseId")
       .populate("courseId", "title")
       .lean();
-
-    const bulkOps = [];
-
-    for (const c of cohorts) {
-      if (!c.scheduleSlots?.length) continue;
-
-      try {
-        const { expandScheduleSlots } =
-          await import("../utils/scheduleHelpers.js");
-        const expanded = expandScheduleSlots({
-          startDate: c.startDate,
-          endDate: c.endDate,
-          scheduleSlots: c.scheduleSlots,
-        });
-
-        for (const slot of expanded || []) {
-          const date = dayStart(slot.date);
-          if (!date) continue;
-          if (date < windowStart || date > windowEnd) continue;
-
-          const startTime =
-            slot.startTime ||
-            (typeof slot.time === "string"
-              ? slot.time.split("-")[0]?.trim()
-              : "") ||
-            "";
-          const endTime =
-            slot.endTime ||
-            (typeof slot.time === "string"
-              ? slot.time.split("-")[1]?.trim()
-              : "") ||
-            "";
-
-          bulkOps.push({
-            updateOne: {
-              filter: { cohortId: c._id, date, startTime },
-              update: {
-                $setOnInsert: {
-                  title: slot.title || "Class",
-                  cohortId: c._id,
-                  courseName:
-                    c.courseTitle || c.courseId?.title || c.name || "Course",
-                  courseId: c.courseId?._id || c.courseId || undefined,
-                  date,
-                  startTime,
-                  endTime,
-                  status: "scheduled",
-                  attendanceMarked: false,
-                  instructorId: req.userId,
-                  generatedFromSchedule: true,
-                },
-              },
-              upsert: true,
-            },
-          });
-        }
-      } catch (e) {
-        console.error("[sessions] expand failed", c.name, e.message || e);
-      }
-    }
-
-    try {
-      const legacy = await ScheduleEvent.find({
-        cohortId: { $in: cohortIdStrs },
-        date: { $gte: windowStart, $lte: windowEnd },
-      }).lean();
-
-      for (const ev of legacy) {
-        const date = dayStart(ev.date);
-        if (!date) continue;
-        const startTime =
-          ev.startTime || (ev.time || "").split("-")[0]?.trim() || "";
-        const endTime =
-          ev.endTime || (ev.time || "").split("-")[1]?.trim() || "";
-
-        bulkOps.push({
-          updateOne: {
-            filter: { cohortId: ev.cohortId, date, startTime },
-            update: {
-              $setOnInsert: {
-                title: ev.title || "Class",
-                cohortId: ev.cohortId,
-                date,
-                startTime,
-                endTime,
-                status: "scheduled",
-                attendanceMarked: false,
-                instructorId: req.userId,
-                generatedFromSchedule: true,
-              },
-            },
-            upsert: true,
-          },
-        });
-      }
-    } catch {
-      /* optional */
-    }
-
-    if (bulkOps.length > 0) {
-      await ClassSession.bulkWrite(bulkOps, { ordered: false });
-    }
 
     const sessions = await ClassSession.find({
       cohortId: { $in: cohortIdStrs },
@@ -278,37 +187,59 @@ export const getInstructorSessions = async (req, res) => {
     const allStudents = await User.find({
       role: "student",
       cohortId: { $in: cohortIdStrs },
-      deletedAt: null,
     })
       .select("_id fullName name avatar cohortId")
       .lean();
 
     const studentsByCohort = {};
     for (const s of allStudents) {
-      const key = String(s.cohortId);
+      const key = String(s.cohortId || "");
+      if (!key) continue;
       if (!studentsByCohort[key]) studentsByCohort[key] = [];
       studentsByCohort[key].push(s);
     }
 
     const sessionIds = sessions.map((s) => s._id);
-    const attendanceRecords =
-      sessionIds.length === 0
-        ? []
-        : await Attendance.find({ sessionId: { $in: sessionIds } })
-            .select("sessionId studentId status")
-            .lean();
+    let attendanceRecords = [];
+    if (sessionIds.length) {
+      try {
+        attendanceRecords = await Attendance.find({
+          $or: [
+            { sessionId: { $in: sessionIds } },
+            { classSessionId: { $in: sessionIds } },
+          ],
+        })
+          .select("sessionId classSessionId studentId status")
+          .lean();
+      } catch (e) {
+        console.error("attendance lookup", e.message);
+      }
+    }
 
     const attendanceMap = {};
     for (const rec of attendanceRecords) {
-      const sid = String(rec.sessionId);
+      const sid = String(rec.sessionId || rec.classSessionId || "");
+      if (!sid) continue;
       if (!attendanceMap[sid]) attendanceMap[sid] = {};
       attendanceMap[sid][String(rec.studentId)] = rec.status;
     }
 
-    const uniqueSessions = dedupeSessions(sessions, attendanceMap);
+    const seen = new Set();
+    const result = [];
 
-    const result = uniqueSessions.map((session) => {
-      const cid = String(session.cohortId);
+    for (const session of sessions) {
+      const cid = String(session.cohortId || "");
+      const dateKey =
+        session.date instanceof Date
+          ? session.date.toISOString().slice(0, 10)
+          : String(session.date || "").slice(0, 10);
+      const start = String(session.startTime || "")
+        .trim()
+        .toLowerCase();
+      const dedupeKey = `${cid}|${dateKey}|${start}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
       const cohort = cohortMap[cid];
       const students = studentsByCohort[cid] || [];
       const att = attendanceMap[String(session._id)] || {};
@@ -331,11 +262,10 @@ export const getInstructorSessions = async (req, res) => {
         };
       });
 
-      const presentCount = studentList.filter((s) => s.isPresent).length;
       const attendanceMarked =
         Boolean(session.attendanceMarked) || Object.keys(att).length > 0;
 
-      return {
+      result.push({
         id: String(session._id),
         title: session.title || "Class session",
         courseName:
@@ -351,22 +281,22 @@ export const getInstructorSessions = async (req, res) => {
         rawDate: session.date,
         status: displayStatusFor(session, attendanceMarked),
         attendanceMarked,
-        presentCount,
+        presentCount: studentList.filter((s) => s.isPresent).length,
         totalStudents: studentList.length,
         students: studentList,
-      };
-    });
+      });
+    }
 
     res.status(200).json({ sessions: result });
   } catch (err) {
     console.error("getInstructorSessions", err);
-    res.status(500).json({ message: "Failed to fetch sessions." });
+    res.status(500).json({
+      message: "Failed to fetch sessions.",
+      error: err.message,
+    });
   }
 };
 
-/**
- * POST /api/instructor/sessions/:sessionId/attendance
- */
 export const markSessionAttendance = async (req, res) => {
   try {
     const { sessionId } = req.params;
