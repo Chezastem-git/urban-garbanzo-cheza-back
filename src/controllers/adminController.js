@@ -20,7 +20,12 @@ import { BadgeDefinition, StudentBadge } from "../models/Badge.js";
 // import Cohort from "../models/Cohort.js";
 // import Course from "../models/Course.js";
 import ClassSession from "../models/ClassSession.js";
-import { expandScheduleSlots } from "../utils/scheduleHelpers.js";
+import {
+  expandScheduleSlots,
+  findInstructorConflict,
+  toDateKey,
+  toDisplayTime,
+} from "../utils/scheduleHelpers.js";
 
 async function setCohortInstructor(cohortId, instructorId) {
   const cohort = await Cohort.findById(cohortId);
@@ -30,7 +35,6 @@ async function setCohortInstructor(cohortId, instructorId) {
     throw err;
   }
 
-  // Strip this cohort from every instructor
   await User.updateMany(
     { role: "instructor", cohortIds: cohortId },
     { $pull: { cohortIds: cohortId } },
@@ -43,6 +47,10 @@ async function setCohortInstructor(cohortId, instructorId) {
   if (!instructorId) {
     cohort.instructorId = null;
     await cohort.save();
+    await ClassSession.updateMany(
+      { cohortId, status: { $ne: "completed" } },
+      { $unset: { instructorId: "" } },
+    );
     return cohort;
   }
 
@@ -56,6 +64,29 @@ async function setCohortInstructor(cohortId, instructorId) {
     throw err;
   }
 
+  const upcoming = await ClassSession.find({
+    cohortId,
+    status: { $ne: "completed" },
+  });
+
+  for (const session of upcoming) {
+    const conflict = await findInstructorConflict({
+      instructorId: instructor._id,
+      date: session.date,
+      startTime: session.startTime,
+      endTime: session.endTime,
+      ignoreSessionId: session._id,
+    });
+
+    if (conflict) {
+      const err = new Error(
+        `Instructor already has a session on ${toDateKey(session.date)} ${toDisplayTime(session.startTime)}–${toDisplayTime(session.endTime)} (${conflict.cohortId?.name || "another cohort"}).`,
+      );
+      err.status = 409;
+      throw err;
+    }
+  }
+
   cohort.instructorId = instructor._id;
   await cohort.save();
 
@@ -65,12 +96,13 @@ async function setCohortInstructor(cohortId, instructorId) {
   }
   await instructor.save();
 
+  await ClassSession.updateMany(
+    { cohortId, status: { $ne: "completed" } },
+    { instructorId: instructor._id },
+  );
+
   return cohort;
 }
-
-// ─────────────────────────────────────────────
-// AUTH
-// ─────────────────────────────────────────────
 
 export const registerAdmin = async (req, res) => {
   try {
@@ -1828,10 +1860,46 @@ export const updateCohortSchedule = async (req, res) => {
       }
     }
 
+    const uniqueSlots = [];
+    for (const slot of scheduleSlots) {
+      const dup = uniqueSlots.some(
+        (s) =>
+          Number(s.dayOfWeek) === Number(slot.dayOfWeek) &&
+          s.startTime === slot.startTime &&
+          s.endTime === slot.endTime,
+      );
+      if (!dup) uniqueSlots.push(slot);
+    }
+
+    const toMin = (t) => {
+      const [h, m] = String(t || "00:00")
+        .split(":")
+        .map(Number);
+      return (h || 0) * 60 + (m || 0);
+    };
+
+    const sameDayOverlap = uniqueSlots.some((a, i) =>
+      uniqueSlots.some((b, j) => {
+        if (i >= j) return false;
+        if (Number(a.dayOfWeek) !== Number(b.dayOfWeek)) return false;
+        return (
+          toMin(a.startTime) < toMin(b.endTime) &&
+          toMin(b.startTime) < toMin(a.endTime)
+        );
+      }),
+    );
+
+    if (sameDayOverlap) {
+      return res.status(409).json({
+        message:
+          "This cohort already has a class on that day at an overlapping time.",
+      });
+    }
+
     const cohort = await Cohort.findByIdAndUpdate(
       req.params.cohortId,
       {
-        scheduleSlots,
+        scheduleSlots: uniqueSlots,
         ...(timezone ? { timezone } : {}),
       },
       { new: true },
@@ -1839,13 +1907,16 @@ export const updateCohortSchedule = async (req, res) => {
 
     if (!cohort) return res.status(404).json({ message: "Cohort not found." });
 
-    res.status(200).json({ message: "Schedule updated.", cohort });
+    return res.status(200).json({
+      message: "Schedule updated.",
+      cohort,
+      conflicts: [],
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to update schedule." });
   }
 };
-
 export const generateClassSessions = async (req, res) => {
   try {
     const { replaceExisting = false } = req.body || {};
@@ -1883,32 +1954,56 @@ export const generateClassSessions = async (req, res) => {
 
     let created = 0;
     let skipped = 0;
+    const conflicts = [];
 
     for (const s of expanded) {
-      try {
-        await ClassSession.create({
-          title: s.title,
+      const conflict = await findInstructorConflict({
+        instructorId: cohort.instructorId,
+        date: s.date,
+        startTime: s.startTime,
+        endTime: s.endTime,
+      });
+
+      if (conflict) {
+        skipped += 1;
+        conflicts.push({
+          date: s.dateKey,
+          time: `${s.startTimeDisplay} – ${s.endTimeDisplay}`,
+          existingCohort: conflict.cohortId?.name || "another cohort",
+        });
+        continue;
+      }
+
+      await ClassSession.findOneAndUpdate(
+        {
           cohortId: cohort._id,
-          courseId: cohort.courseId || undefined,
-          courseName,
           date: s.date,
           startTime: s.startTime,
-          endTime: s.endTime,
-          status: "scheduled",
-          instructorId: cohort.instructorId || undefined,
-          generatedFromSchedule: true,
-        });
-        created += 1;
-      } catch (e) {
-        if (e?.code === 11000) skipped += 1;
-        else throw e;
-      }
+        },
+        {
+          $setOnInsert: {
+            title: s.title || "Live class",
+            cohortId: cohort._id,
+            courseId: cohort.courseId || undefined,
+            courseName,
+            date: s.date,
+            startTime: s.startTime,
+            endTime: s.endTime,
+            status: "scheduled",
+            instructorId: cohort.instructorId || undefined,
+            generatedFromSchedule: true,
+          },
+        },
+        { upsert: true },
+      );
+      created += 1;
     }
 
     res.status(201).json({
-      message: `Generated ${created} class session(s). ${skipped} skipped (already exist).`,
+      message: `Synced ${created} class session(s). ${skipped} skipped.`,
       created,
       skipped,
+      conflicts,
       totalExpanded: expanded.length,
     });
   } catch (err) {
@@ -1957,8 +2052,6 @@ export const getClassSessionById = async (req, res) => {
 
     // If you don't have Attendance model yet:
     res.status(200).json({ session, attendance: [] });
-
-
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to fetch session." });

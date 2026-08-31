@@ -4,7 +4,7 @@ import Cohort from "../models/Cohort.js";
 import ClassSession from "../models/ClassSession.js";
 import Attendance from "../models/Attendance.js";
 import ScheduleEvent from "../models/ScheduleEvent.js";
-import RecordedSession from "../models/RecordedSession.js"
+import RecordedSession from "../models/RecordedSession.js";
 
 async function getInstructorCohortIds(instructorId) {
   const instructor = await User.findById(instructorId)
@@ -44,8 +44,73 @@ function formatDate(d) {
 }
 
 function formatTime(start, end) {
-  if (start && end) return `${start} - ${end}`;
-  return start || "—";
+  const a = toDisplayTime(start);
+  const b = toDisplayTime(end);
+  if (a && b) return `${a} - ${b}`;
+  return a || "—";
+}
+
+function toDateKey(value) {
+  if (!value) return "";
+  if (typeof value === "string") {
+    const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+    if (match) return match[1];
+  }
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value).slice(0, 10);
+  return d.toISOString().slice(0, 10);
+}
+
+function normalizeTime(value = "") {
+  return String(value).trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function sessionDedupeKey(session) {
+  const cohortId = String(session.cohortId?._id || session.cohortId || "");
+  const dateKey = toDateKey(session.date);
+  const start = normalizeTime(
+    session.startTime || (session.time || "").split("-")[0] || "",
+  );
+  return `${cohortId}|${dateKey}|${start}`;
+}
+
+function scoreSession(session, attendanceCount = 0) {
+  let score = 0;
+  if (session.attendanceMarked) score += 8;
+  if (session.status === "completed" || session.completedAt) score += 6;
+  if (!session.generatedFromSchedule) score += 4;
+  score += Math.min(attendanceCount, 5);
+  return score;
+}
+
+function dedupeSessions(sessions, attendanceMap) {
+  const best = new Map();
+
+  for (const session of sessions) {
+    const key = sessionDedupeKey(session);
+    const current = best.get(key);
+    const attendanceCount = Object.keys(
+      attendanceMap[String(session._id)] || {},
+    ).length;
+
+    if (!current) {
+      best.set(key, session);
+      continue;
+    }
+
+    const currentCount = Object.keys(
+      attendanceMap[String(current._id)] || {},
+    ).length;
+
+    if (
+      scoreSession(session, attendanceCount) >
+      scoreSession(current, currentCount)
+    ) {
+      best.set(key, session);
+    }
+  }
+
+  return Array.from(best.values());
 }
 
 /**
@@ -66,9 +131,8 @@ function displayStatusFor(session, attendanceMarked) {
   const todayEnd = new Date();
   todayEnd.setHours(23, 59, 59, 999);
 
-  // Normalize session date to local day bounds for comparison
   const d = new Date(sessionDate);
-  d.setHours(12, 0, 0, 0); // midday avoids TZ edge cases
+  d.setHours(12, 0, 0, 0);
 
   if (d >= todayStart && d <= todayEnd) return "ongoing";
   if (d < todayStart) return "unmarked";
@@ -241,8 +305,9 @@ export const getInstructorSessions = async (req, res) => {
       attendanceMap[sid][String(rec.studentId)] = rec.status;
     }
 
-    // ── HERE: displayStatus + cohortName ───────────────────────────────
-    const result = sessions.map((session) => {
+    const uniqueSessions = dedupeSessions(sessions, attendanceMap);
+
+    const result = uniqueSessions.map((session) => {
       const cid = String(session.cohortId);
       const cohort = cohortMap[cid];
       const students = studentsByCohort[cid] || [];
@@ -302,9 +367,6 @@ export const getInstructorSessions = async (req, res) => {
 /**
  * POST /api/instructor/sessions/:sessionId/attendance
  */
-/**
- * POST /api/instructor/sessions/:sessionId/attendance
- */
 export const markSessionAttendance = async (req, res) => {
   try {
     const { sessionId } = req.params;
@@ -330,7 +392,6 @@ export const markSessionAttendance = async (req, res) => {
       return res.status(403).json({ message: "Not your cohort." });
     }
 
-    // Match schema: date is a string "YYYY-MM-DD"
     const d = session.date ? new Date(session.date) : new Date();
     const dateStr = Number.isNaN(d.getTime())
       ? new Date().toISOString().slice(0, 10)
@@ -364,7 +425,6 @@ export const markSessionAttendance = async (req, res) => {
     }
     await session.save();
 
-    // Create RecordedSession only when a URL is provided
     let recorded = null;
     if (completeSession && videoUrl?.trim()) {
       const instructor = await User.findById(req.userId)

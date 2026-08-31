@@ -12,7 +12,7 @@ import Segment from "../models/Segment.js";
 import ClassSession from "../models/ClassSession.js";
 import ScheduleEvent from "../models/ScheduleEvent.js";
 import Challenge from "../models/Challenge.js";
-
+import { toDisplayTime } from "../utils/scheduleHelpers.js";
 /** Resolve cohort by code or ObjectId */
 async function findCohortBySlug(slug) {
   if (!slug) return null;
@@ -1777,10 +1777,7 @@ export const getStudentNotificationsForInstructor = async (req, res) => {
     res.status(500).json({ message: "Failed to fetch notifications." });
   }
 };
-/**
- * GET /api/instructor/schedule
- * Merged calendar for ALL cohorts this instructor owns. No other cohorts.
- */
+
 export const getInstructorSchedule = async (req, res) => {
   try {
     const cohortIds = await getInstructorCohortIds(req.userId);
@@ -1789,7 +1786,7 @@ export const getInstructorSchedule = async (req, res) => {
     }
 
     const cohorts = await Cohort.find({ _id: { $in: cohortIds } })
-      .select("name code startDate endDate scheduleSlots")
+      .select("name code")
       .lean();
 
     const theme = {
@@ -1803,39 +1800,44 @@ export const getInstructorSchedule = async (req, res) => {
 
     const toDateKey = (value) => {
       if (!value) return null;
-      if (typeof value === "string") return value.slice(0, 10);
+      if (typeof value === "string") {
+        const match = value.match(/^(\d{4}-\d{2}-\d{2})/);
+        return match ? match[1] : value.slice(0, 10);
+      }
       const d = value instanceof Date ? value : new Date(value);
       if (Number.isNaN(d.getTime())) return null;
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      return `${y}-${m}-${day}`;
+      return d.toISOString().slice(0, 10);
     };
 
-    const schedule = {}; // dateKey -> EventItem[]
-
-    const pushEvent = (key, evt) => {
-      if (!key) return;
-      if (!schedule[key]) schedule[key] = [];
-      schedule[key].push(evt);
-    };
+    const schedule = {};
 
     const sessions = await ClassSession.find({
       cohortId: { $in: cohortIds },
     })
-      .sort({ date: 1 })
+      .sort({ date: 1, startTime: 1 })
       .lean();
 
     for (const s of sessions) {
       const key = toDateKey(s.date);
+      if (!key) continue;
+
       const cohort = cohorts.find((c) => String(c._id) === String(s.cohortId));
       const cohortLabel = cohort?.name || cohort?.code || "Cohort";
       const start = s.startTime || "";
       const end = s.endTime || "";
       const time =
-        start && end ? `${start} - ${end}` : start || end || s.time || "";
+        start && end
+          ? `${toDisplayTime(start)} - ${toDisplayTime(end)}`
+          : toDisplayTime(start || end);
 
-      pushEvent(key, {
+      if (!schedule[key]) schedule[key] = [];
+
+      const alreadyThere = schedule[key].some(
+        (evt) => evt.cohortId === String(s.cohortId) && evt.time === time,
+      );
+      if (alreadyThere) continue;
+
+      schedule[key].push({
         id: String(s._id),
         title: `${s.title || "Class"} · ${cohortLabel}`,
         type: s.type === "demo" || s.type === "event" ? s.type : "class",
@@ -1845,71 +1847,6 @@ export const getInstructorSchedule = async (req, res) => {
         cohortName: cohortLabel,
         theme,
       });
-    }
-
-    for (const c of cohorts) {
-      if (!c.scheduleSlots?.length) continue;
-      try {
-        const { expandScheduleSlots } =
-          await import("../utils/scheduleHelpers.js");
-        const expanded = expandScheduleSlots({
-          startDate: c.startDate,
-          endDate: c.endDate,
-          scheduleSlots: c.scheduleSlots,
-        });
-        expanded.forEach((s, i) => {
-          const key = toDateKey(s.date);
-          const start = s.startTime || "";
-          const end = s.endTime || "";
-          const time = start && end ? `${start} - ${end}` : start || end || "";
-          pushEvent(key, {
-            id: `slot-${c._id}-${i}-${key}`,
-            title: `${s.title || "Class"} · ${c.name || c.code}`,
-            type: "class",
-            time,
-            location: s.location || "",
-            cohortId: String(c._id),
-            cohortName: c.name || c.code,
-            theme,
-          });
-        });
-      } catch (e) {
-        console.error("expandScheduleSlots instructor", e);
-      }
-    }
-
-    try {
-      const legacy = await ScheduleEvent.find({
-        cohortId: { $in: cohortIds },
-      })
-        .sort({ date: 1 })
-        .lean();
-
-      for (const ev of legacy) {
-        const key = toDateKey(ev.date);
-        const cohort = cohorts.find(
-          (c) => String(c._id) === String(ev.cohortId),
-        );
-        const cohortLabel = cohort?.name || cohort?.code || "Cohort";
-        const start =
-          ev.startTime || (ev.time || "").split("-")[0]?.trim() || "";
-        const end = ev.endTime || (ev.time || "").split("-")[1]?.trim() || "";
-        const time =
-          start && end ? `${start} - ${end}` : start || end || ev.time || "";
-
-        pushEvent(key, {
-          id: String(ev._id),
-          title: `${ev.title || "Event"} · ${cohortLabel}`,
-          type: ev.type === "demo" || ev.type === "event" ? ev.type : "class",
-          time,
-          location: ev.location || "",
-          cohortId: String(ev.cohortId),
-          cohortName: cohortLabel,
-          theme,
-        });
-      }
-    } catch {
-      // ScheduleEvent model optional
     }
 
     for (const key of Object.keys(schedule)) {
@@ -1922,7 +1859,6 @@ export const getInstructorSchedule = async (req, res) => {
     res.status(500).json({ message: "Failed to fetch schedule." });
   }
 };
-
 export const createStudentChallenge = async (req, res) => {
   try {
     const { studentId } = req.params;
