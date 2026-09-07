@@ -1,5 +1,5 @@
 // src/controllers/publicController.js
-import User from "../models/User.js"; 
+import User from "../models/User.js";
 
 export const getPublicIdCard = async (req, res) => {
   try {
@@ -14,8 +14,9 @@ export const getPublicIdCard = async (req, res) => {
       role: "student",
     })
       .select(
-        "fullName admissionNumber idPhoto officialPhoto avatar status createdAt cohortName courseTitle",
+        "fullName admissionNumber idPhoto officialPhoto avatar status createdAt course courseTitle cohortName cohort",
       )
+      .populate("cohort", "name courseTitle startDate endDate")
       .lean();
 
     if (!student) {
