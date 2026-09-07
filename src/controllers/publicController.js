@@ -16,7 +16,14 @@ export const getPublicIdCard = async (req, res) => {
       .select(
         "fullName admissionNumber idPhoto avatar status createdAt cohortId",
       )
-      .populate("cohortId", "name courseTitle title startDate endDate")
+      .populate({
+        path: "cohortId",
+        select: "name courseTitle title course courseId startDate endDate",
+        populate: [
+          { path: "course", select: "name title courseTitle" },
+          { path: "courseId", select: "name title courseTitle" },
+        ],
+      })
       .lean();
 
     if (!student) {
@@ -30,12 +37,21 @@ export const getPublicIdCard = async (req, res) => {
     }
 
     const cohort = student.cohortId || null;
+
     const issuedAt = cohort?.startDate || student.createdAt || new Date();
     const validUntil = new Date(issuedAt);
     validUntil.setFullYear(validUntil.getFullYear() + 1);
 
     const courseName =
-      cohort?.courseTitle || cohort?.title || cohort?.name || null;
+      cohort?.courseTitle ||
+      cohort?.title ||
+      cohort?.course?.courseTitle ||
+      cohort?.course?.title ||
+      cohort?.course?.name ||
+      cohort?.courseId?.courseTitle ||
+      cohort?.courseId?.title ||
+      cohort?.courseId?.name ||
+      null;
 
     return res.status(200).json({
       fullName: student.fullName,
@@ -43,13 +59,27 @@ export const getPublicIdCard = async (req, res) => {
       idPhoto: student.idPhoto || student.avatar || null,
       courseName,
       cohortName: cohort?.name || null,
-      courseTitle: cohort?.courseTitle || cohort?.title || null,
+      courseTitle:
+        cohort?.courseTitle ||
+        cohort?.title ||
+        cohort?.course?.courseTitle ||
+        cohort?.course?.title ||
+        cohort?.courseId?.courseTitle ||
+        cohort?.courseId?.title ||
+        null,
       cohort: cohort
         ? {
-            name: cohort.name,
-            courseTitle: cohort.courseTitle || cohort.title,
-            startDate: cohort.startDate,
-            endDate: cohort.endDate,
+            name: cohort.name || null,
+            courseTitle:
+              cohort.courseTitle ||
+              cohort.title ||
+              cohort.course?.courseTitle ||
+              cohort.course?.title ||
+              cohort.courseId?.courseTitle ||
+              cohort.courseId?.title ||
+              null,
+            startDate: cohort.startDate || null,
+            endDate: cohort.endDate || null,
           }
         : null,
       status: student.status || "active",
@@ -58,6 +88,9 @@ export const getPublicIdCard = async (req, res) => {
     });
   } catch (err) {
     console.error("[public/id-card]", err);
-    return res.status(500).json({ message: "Unable to verify student ID" });
+    return res.status(500).json({
+      message: "Unable to verify student ID",
+      error: err?.message,
+    });
   }
 };
